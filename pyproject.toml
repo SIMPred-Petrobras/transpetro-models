@@ -1,0 +1,20 @@
+[project]
+name = "transpetro-modelos"
+version = "0.1.0"
+description = "Anomaly detection for Transpetro pump predictive maintenance"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.2.0",
+    "pandas>=2.2.0",
+    "pyarrow>=15.0.0",
+    "scikit-learn>=1.4.0",
+    "matplotlib>=3.8.0",
+    "clearml>=1.16.0",
+    "openpyxl>=3.1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv]
+package = true

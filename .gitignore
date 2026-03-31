@@ -1,0 +1,12 @@
+Dados/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.pt
+artifacts/
+*.egg-info/
+.claude/
+.codex/
+.codex

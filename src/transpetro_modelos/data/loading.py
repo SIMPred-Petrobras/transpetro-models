@@ -1,0 +1,36 @@
+import os
+from pathlib import Path
+import pandas as pd
+from transpetro_modelos.config import EQUIPMENT_CONFIGS
+
+LOCAL_DATA_DIR = Path(__file__).parent.parent.parent.parent / "Dados"
+
+
+def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.DataFrame:
+    """
+    Carrega dados de um equipamento com DatetimeIndex.
+    Se from_clearml=True, baixa do ClearML Dataset; caso contrário lê local.
+    """
+    config = EQUIPMENT_CONFIGS[equipment_id]
+
+    if from_clearml:
+        from clearml import Dataset
+        ds = Dataset.get(
+            dataset_name=config.dataset_name,
+            dataset_project="Transpetro",
+        )
+        local_path = ds.get_local_copy()
+        file_path = Path(local_path) / f"{equipment_id}.feather"
+    else:
+        file_path = LOCAL_DATA_DIR / f"{equipment_id}.feather"
+
+    df = pd.read_feather(file_path)
+
+    if config.datetime_column is not None:
+        df = df.set_index(config.datetime_column)
+        df.index = pd.to_datetime(df.index)
+    else:
+        df.index = pd.to_datetime(df.index)
+
+    df = df.sort_index()
+    return df
