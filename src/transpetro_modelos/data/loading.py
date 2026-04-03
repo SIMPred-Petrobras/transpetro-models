@@ -4,6 +4,7 @@ import pandas as pd
 from transpetro_modelos.config import EQUIPMENT_CONFIGS
 
 LOCAL_DATA_DIR = Path(__file__).parent.parent.parent.parent / "Dados"
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
 
 def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.DataFrame:
@@ -21,6 +22,8 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
         )
         local_path = ds.get_local_copy()
         file_path = Path(local_path) / f"{equipment_id}.feather"
+    elif config.local_feather is not None:
+        file_path = PROJECT_ROOT / config.local_feather
     else:
         file_path = LOCAL_DATA_DIR / f"{equipment_id}.feather"
 

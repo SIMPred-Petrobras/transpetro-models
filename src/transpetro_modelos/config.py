@@ -9,9 +9,11 @@ class EquipmentConfig:
     failure_date: datetime
     failure_description: str
     dataset_name: str
-    datetime_column: Optional[str]  # "Data Hora" para B-402E, None para demais (DatetimeIndex)
+    datetime_column: Optional[str]  # "Data Hora" para B-402E, "Timestamp" para B-4064A novos, None para demais
     exclusion_days_before: int
     preprocessing_steps: list[dict]
+    pre_split_steps: list[dict] = field(default_factory=list)  # resample, filter_running (roda antes do split)
+    local_feather: Optional[str] = None  # override path for local loading (relative to project root)
 
 
 EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
@@ -36,6 +38,25 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         datetime_column=None,
         exclusion_days_before=10,
         preprocessing_steps=[
+            {"step": "normalize", "method": "standard"},
+        ],
+    ),
+    "B-4064A-novos": EquipmentConfig(
+        equipment_id="B-4064A-novos",
+        failure_date=datetime(2024, 8, 30, 7, 58),
+        failure_description="Roçamento interno do rotor com a carcaça da bomba",
+        dataset_name="transpetro-b-4064a-novos",
+        datetime_column="Timestamp",
+        exclusion_days_before=10,
+        local_feather="Dados-novos/B-4064A_novos.feather",
+        pre_split_steps=[
+            {"step": "remove_sensor_errors", "error_values": [-25.0]},
+            {"step": "resample", "freq": "1h"},
+            {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
+            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
+        ],
+        preprocessing_steps=[
+            {"step": "ffill", "limit": 4},
             {"step": "normalize", "method": "standard"},
         ],
     ),

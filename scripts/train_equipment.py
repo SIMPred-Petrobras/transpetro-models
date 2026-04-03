@@ -20,7 +20,7 @@ from transpetro_modelos.training.evaluate import (
 )
 
 
-def main(equipment_id: str, remote: bool = False) -> None:
+def main(equipment_id: str, remote: bool = False, local_data: bool = False) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
 
     task = Task.init(
@@ -40,6 +40,7 @@ def main(equipment_id: str, remote: bool = False) -> None:
         "exclusion_days": config.exclusion_days_before,
         "threshold_percentile": 95.0,
         "weight_decay": 1e-5,
+        "pre_split_steps": config.pre_split_steps,
         "preprocessing_steps": config.preprocessing_steps,
     }
     task.connect(hparams)
@@ -53,10 +54,16 @@ def main(equipment_id: str, remote: bool = False) -> None:
 
     # 1. Load data
     print(f"Loading data for {equipment_id}...")
-    df = load_equipment_data(equipment_id, from_clearml=True)
+    df = load_equipment_data(equipment_id, from_clearml=not local_data)
     print(f"  Loaded: {df.shape}")
 
-    # 2. Split (before preprocessing to avoid data leakage)
+    # 2. Pre-split preprocessing (resample, filter_running) — runs on full dataset
+    pre_steps = hparams["pre_split_steps"]
+    if pre_steps:
+        df, _ = run_preprocessing(df, pre_steps, fitted_scaler=None)
+        print(f"  After pre-split preprocessing: {df.shape}")
+
+    # 3. Split
     splits = temporal_split(
         df,
         failure_date=config.failure_date,
@@ -64,7 +71,8 @@ def main(equipment_id: str, remote: bool = False) -> None:
     )
     print(f"  Train: {splits['train'].shape}, Val: {splits['val'].shape}, Test: {splits['test'].shape}")
 
-    # 3. Preprocess (fit scaler on train only)
+    # 4. Post-split preprocessing (ffill + normalize) — fit scaler on train only
+    # ffill runs inside each split independently to avoid data leakage
     steps = hparams["preprocessing_steps"]
     train_df, scaler = run_preprocessing(splits["train"], steps, fitted_scaler=None)
     val_df, _ = run_preprocessing(splits["val"], steps, fitted_scaler=scaler)
@@ -130,6 +138,13 @@ def main(equipment_id: str, remote: bool = False) -> None:
     })
     task.upload_artifact("test_scores", artifact_object=scores_df)
 
+    # 11. Score full dataset (all periods) for visualization — no influence on training
+    print("Scoring full dataset for cross-period analysis...")
+    full_df, _ = run_preprocessing(df, steps, fitted_scaler=scaler)
+    full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
+    task.upload_artifact("full_scores", artifact_object=full_scores)
+    print(f"  Full dataset scored: {len(full_scores)} samples, {full_scores['is_anomaly'].sum()} anomalies")
+
     print("Done! Artifacts saved to ClearML.")
 
 
@@ -137,5 +152,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--equipment", required=True, choices=list(EQUIPMENT_CONFIGS.keys()))
     parser.add_argument("--remote", action="store_true", help="Submit to ClearML queue for remote execution")
+    parser.add_argument("--local-data", action="store_true", help="Load data from local files instead of ClearML")
     args = parser.parse_args()
-    main(args.equipment, remote=args.remote)
+    main(args.equipment, remote=args.remote, local_data=args.local_data)

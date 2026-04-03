@@ -62,9 +62,33 @@ def select_features(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     return df[features].copy()
 
 
-def resample(df: pd.DataFrame, freq: str = "5min") -> pd.DataFrame:
-    """Resample time series to a given frequency using mean aggregation."""
-    return df.resample(freq).mean().dropna()
+def remove_sensor_errors(df: pd.DataFrame, error_values: list[float] | None = None) -> pd.DataFrame:
+    """Replace known sensor error codes with NaN (e.g., -25.0 in temperature sensors)."""
+    if error_values is None:
+        error_values = [-25.0]
+    df = df.copy()
+    for val in error_values:
+        df = df.replace(val, np.nan)
+    return df
+
+
+def resample(df: pd.DataFrame, freq: str = "1h") -> pd.DataFrame:
+    """
+    Resample COV (change-on-value) time series to a regular grid.
+    Uses .last() to preserve the last recorded value in each window.
+    NaN filling is intentionally NOT done here — use the ffill step after split
+    to avoid data leakage between train and test sets.
+    """
+    return df.resample(freq).last()
+
+
+def ffill(df: pd.DataFrame, limit: int = 4) -> pd.DataFrame:
+    """
+    Forward-fill NaN values up to `limit` consecutive periods.
+    Rows that remain NaN after fill (gaps longer than limit) are dropped.
+    Apply this step AFTER the train/test split to avoid data leakage.
+    """
+    return df.ffill(limit=limit).dropna()
 
 
 def run_preprocessing(
@@ -102,6 +126,10 @@ def run_preprocessing(
             df = select_features(df, **params)
         elif step == "resample":
             df = resample(df, **params)
+        elif step == "ffill":
+            df = ffill(df, **params)
+        elif step == "remove_sensor_errors":
+            df = remove_sensor_errors(df, **params)
         else:
             raise ValueError(f"Unknown preprocessing step: '{step}'")
 
