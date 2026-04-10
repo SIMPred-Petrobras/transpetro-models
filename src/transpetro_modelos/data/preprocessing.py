@@ -35,6 +35,33 @@ def remove_transients(df: pd.DataFrame, minutes: int = 10) -> pd.DataFrame:
     return df[mask].copy()
 
 
+def clip(
+    df: pd.DataFrame,
+    bounds=None,
+    lower_pct: float = 1.0,
+    upper_pct: float = 99.0,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Clip values to [P_lower, P_upper] per column.
+    If bounds is None, calculates from data (use on train set).
+    Returns (clipped_df, bounds_dict).
+    """
+    if bounds is None:
+        bounds = {}
+        for col in df.columns:
+            bounds[col] = (
+                np.percentile(df[col].dropna(), lower_pct),
+                np.percentile(df[col].dropna(), upper_pct),
+            )
+
+    df = df.copy()
+    for col in df.columns:
+        lo, hi = bounds[col]
+        df[col] = df[col].clip(lo, hi)
+
+    return df, bounds
+
+
 def normalize(
     df: pd.DataFrame,
     method: str = "standard",
@@ -95,22 +122,25 @@ def run_preprocessing(
     df: pd.DataFrame,
     steps: list[dict],
     fitted_scaler=None,
-) -> tuple[pd.DataFrame, object]:
+    fitted_clip_bounds=None,
+) -> tuple[pd.DataFrame, object, dict | None]:
     """
     Execute a preprocessing pipeline defined as a list of step dicts.
-    Returns (processed_df, scaler) — scaler is None if no normalize step.
+    Returns (processed_df, scaler, clip_bounds).
 
     Steps example:
         [
             {"step": "filter_running", "column": "Corrente", "threshold": 1.0},
             {"step": "remove_transients", "minutes": 10},
+            {"step": "clip"},
             {"step": "normalize", "method": "standard"},
         ]
 
-    On the train set, pass fitted_scaler=None (fits a new scaler).
-    On val/test sets, pass the scaler returned from the train call.
+    On the train set, pass fitted_scaler=None and fitted_clip_bounds=None.
+    On val/test sets, pass the scaler and clip_bounds returned from the train call.
     """
     scaler = fitted_scaler
+    clip_bounds = fitted_clip_bounds
 
     for step_cfg in steps:
         step = step_cfg["step"]
@@ -122,6 +152,8 @@ def run_preprocessing(
             df = remove_transients(df, **params)
         elif step == "normalize":
             df, scaler = normalize(df, scaler=scaler, **params)
+        elif step == "clip":
+            df, clip_bounds = clip(df, bounds=clip_bounds, **params)
         elif step == "select_features":
             df = select_features(df, **params)
         elif step == "resample":
@@ -133,4 +165,4 @@ def run_preprocessing(
         else:
             raise ValueError(f"Unknown preprocessing step: '{step}'")
 
-    return df, scaler
+    return df, scaler, clip_bounds

@@ -14,6 +14,7 @@ class EquipmentConfig:
     preprocessing_steps: list[dict]
     pre_split_steps: list[dict] = field(default_factory=list)  # resample, filter_running (roda antes do split)
     local_feather: Optional[str] = None  # override path for local loading (relative to project root)
+    val_start_date: Optional[datetime] = None  # fixed validation start date (e.g., Jul 1)
 
 
 EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
@@ -49,15 +50,17 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         datetime_column="Timestamp",
         exclusion_days_before=10,
         local_feather="Dados-novos/B-4064A_novos.feather",
+        val_start_date=datetime(2024, 7, 1),
         pre_split_steps=[
             {"step": "remove_sensor_errors", "error_values": [-25.0]},
             {"step": "resample", "freq": "1h"},
+            {"step": "ffill", "limit": 6},
             {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
             {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
         ],
         preprocessing_steps=[
-            {"step": "ffill", "limit": 4},
-            {"step": "normalize", "method": "standard"},
+            {"step": "clip"},
+            {"step": "normalize", "method": "robust"},
         ],
     ),
     "B-8802B": EquipmentConfig(

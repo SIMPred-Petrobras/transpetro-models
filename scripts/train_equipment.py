@@ -23,12 +23,13 @@ from transpetro_modelos.training.evaluate import (
 def main(equipment_id: str, remote: bool = False, local_data: bool = False) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
 
+    Task.add_requirements("pyarrow")
     task = Task.init(
         project_name="Transpetro",
         task_name=f"autoencoder-{equipment_id}",
         output_uri=True,
     )
-    task.set_base_docker("nvidia/cuda:12.9.1-cudnn-runtime-ubuntu22.04")
+    task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
 
     hparams = {
         "equipment_id": equipment_id,
@@ -42,6 +43,7 @@ def main(equipment_id: str, remote: bool = False, local_data: bool = False) -> N
         "weight_decay": 1e-5,
         "pre_split_steps": config.pre_split_steps,
         "preprocessing_steps": config.preprocessing_steps,
+        "val_start_date": config.val_start_date.isoformat() if config.val_start_date else None,
     }
     task.connect(hparams)
 
@@ -60,23 +62,28 @@ def main(equipment_id: str, remote: bool = False, local_data: bool = False) -> N
     # 2. Pre-split preprocessing (resample, filter_running) — runs on full dataset
     pre_steps = hparams["pre_split_steps"]
     if pre_steps:
-        df, _ = run_preprocessing(df, pre_steps, fitted_scaler=None)
+        df, _, _ = run_preprocessing(df, pre_steps, fitted_scaler=None)
         print(f"  After pre-split preprocessing: {df.shape}")
 
     # 3. Split
+    val_start = None
+    if hparams["val_start_date"]:
+        from datetime import datetime as dt
+        val_start = dt.fromisoformat(hparams["val_start_date"])
+
     splits = temporal_split(
         df,
         failure_date=config.failure_date,
         exclusion_days=hparams["exclusion_days"],
+        val_start_date=val_start,
     )
     print(f"  Train: {splits['train'].shape}, Val: {splits['val'].shape}, Test: {splits['test'].shape}")
 
-    # 4. Post-split preprocessing (ffill + normalize) — fit scaler on train only
-    # ffill runs inside each split independently to avoid data leakage
+    # 4. Post-split preprocessing (clip + normalize) — fit on train only, reuse on val/test
     steps = hparams["preprocessing_steps"]
-    train_df, scaler = run_preprocessing(splits["train"], steps, fitted_scaler=None)
-    val_df, _ = run_preprocessing(splits["val"], steps, fitted_scaler=scaler)
-    test_df, _ = run_preprocessing(splits["test"], steps, fitted_scaler=scaler)
+    train_df, scaler, clip_bounds = run_preprocessing(splits["train"], steps, fitted_scaler=None)
+    val_df, _, _ = run_preprocessing(splits["val"], steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
+    test_df, _, _ = run_preprocessing(splits["test"], steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
 
     n_features = train_df.shape[1]
     encoding_layers = hparams["encoding_layers"]
@@ -125,6 +132,8 @@ def main(equipment_id: str, remote: bool = False, local_data: bool = False) -> N
     torch.save(model.state_dict(), model_path)
     task.upload_artifact("model_file", artifact_object=model_path)
     task.upload_artifact("scaler", artifact_object=scaler)
+    if clip_bounds:
+        task.upload_artifact("clip_bounds", artifact_object=clip_bounds)
     task.upload_artifact("results", artifact_object={
         "threshold": threshold,
         "train_mse_mean": float(train_errors.mean()),
@@ -140,7 +149,7 @@ def main(equipment_id: str, remote: bool = False, local_data: bool = False) -> N
 
     # 11. Score full dataset (all periods) for visualization — no influence on training
     print("Scoring full dataset for cross-period analysis...")
-    full_df, _ = run_preprocessing(df, steps, fitted_scaler=scaler)
+    full_df, _, _ = run_preprocessing(df, steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
     full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
     task.upload_artifact("full_scores", artifact_object=full_scores)
     print(f"  Full dataset scored: {len(full_scores)} samples, {full_scores['is_anomaly'].sum()} anomalies")
