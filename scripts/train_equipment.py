@@ -1,6 +1,7 @@
 import argparse
 import sys
 from pathlib import Path
+import numpy as np
 
 import torch
 
@@ -9,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from clearml import Task
 from transpetro_modelos.config import EQUIPMENT_CONFIGS
 from transpetro_modelos.data.loading import load_equipment_data
+from datetime import datetime as dt
 from transpetro_modelos.data.preprocessing import run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder
@@ -19,6 +21,12 @@ from transpetro_modelos.training.evaluate import (
     score_test_set,
 )
 
+
+def remove_normalize(steps: list[dict]) -> list[dict]:
+    """
+    Remove o step de normalização do pipeline.
+    """
+    return [step for step in steps if step["step"] != "normalize"]
 
 def main(equipment_id: str, remote: bool = False) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
@@ -38,14 +46,17 @@ def main(equipment_id: str, remote: bool = False) -> None:
         "epochs": 100,
         "patience": 10,
         "exclusion_days": config.exclusion_days_before,
-        "threshold_percentile": 95.0,
+        "threshold_percentile": 99.5,
         "weight_decay": 1e-5,
+        "pre_split_steps": config.pre_split_steps,
         "preprocessing_steps": config.preprocessing_steps,
+        "val_start_date": config.val_start_date.isoformat() if config.val_start_date else None,
+        "val_end_date": config.val_end_date.isoformat() if config.val_end_date else None,
     }
     task.connect(hparams)
 
-    if remote:
-        task.execute_remotely(queue_name="default")
+    #if remote:
+        #task.execute_remotely(queue_name="default")
     # Everything below runs on the server when remote=True
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -53,22 +64,45 @@ def main(equipment_id: str, remote: bool = False) -> None:
 
     # 1. Load data
     print(f"Loading data for {equipment_id}...")
-    df = load_equipment_data(equipment_id, from_clearml=True)
+    df = load_equipment_data(equipment_id, from_clearml=False)
     print(f"  Loaded: {df.shape}")
 
+    pre_steps = hparams["pre_split_steps"]
+    if pre_steps:
+        df, _, _ = run_preprocessing(df, pre_steps, fitted_scaler=None)
+        print(f"  After pre-split preprocessing: {df.shape}")
+
     # 2. Split (before preprocessing to avoid data leakage)
+    val_start = None
+    val_end = None 
+
+    if hparams["val_start_date"]:
+        val_start = dt.fromisoformat(hparams["val_start_date"])
+
+    if hparams.get("val_end_date"):
+        val_end = dt.fromisoformat(hparams["val_end_date"])
+
     splits = temporal_split(
         df,
-        failure_date=config.failure_date,
-        exclusion_days=hparams["exclusion_days"],
+        val_start_date=val_start,
+        val_end_date=val_end,
     )
-    print(f"  Train: {splits['train'].shape}, Val: {splits['val'].shape}, Test: {splits['test'].shape}")
 
     # 3. Preprocess (fit scaler on train only)
     steps = hparams["preprocessing_steps"]
-    train_df, scaler = run_preprocessing(splits["train"], steps, fitted_scaler=None)
-    val_df, _ = run_preprocessing(splits["val"], steps, fitted_scaler=scaler)
-    test_df, _ = run_preprocessing(splits["test"], steps, fitted_scaler=scaler)
+
+    train_df, scaler, clip_bounds = run_preprocessing(splits["train"], steps, fitted_scaler=None)
+    train_df = train_df.dropna()
+
+    val_df, _, _ = run_preprocessing(splits["val"], steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
+    val_df = val_df.dropna()
+
+    # roda pipeline SEM normalize
+    test_df_raw, _, _ = run_preprocessing(splits["test"], remove_normalize(steps),fitted_scaler=None, fitted_clip_bounds=clip_bounds)
+    test_df_raw = test_df_raw.dropna()
+
+    test_df, _, _ = run_preprocessing(splits["test"], steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
+    test_df = test_df.dropna()
 
     n_features = train_df.shape[1]
     encoding_layers = hparams["encoding_layers"]
@@ -104,6 +138,18 @@ def main(equipment_id: str, remote: bool = False) -> None:
 
     # 8. Score test set (with timestamps)
     scores_df = score_test_set(model, test_df, threshold=threshold, device=device)
+    #errors = scores_df["reconstruction_error"]
+
+    #errors = errors.rolling(5).mean()
+   # threshold = np.percentile(train_errors, 99.9)
+    '''scores_df["is_anomaly"] = (
+        (errors > threshold)
+        .rolling(5)
+        .sum() >= 3
+    )'''
+    
+    df_scores = test_df_raw.join(scores_df)
+    df_scores.to_csv("../Dados/scores.csv")
 
     # 9. Log scalars to ClearML
     logger = task.get_logger()
@@ -117,6 +163,8 @@ def main(equipment_id: str, remote: bool = False) -> None:
     torch.save(model.state_dict(), model_path)
     task.upload_artifact("model_file", artifact_object=model_path)
     task.upload_artifact("scaler", artifact_object=scaler)
+    if clip_bounds:
+        task.upload_artifact("clip_bounds", artifact_object=clip_bounds)
     task.upload_artifact("results", artifact_object={
         "threshold": threshold,
         "train_mse_mean": float(train_errors.mean()),
@@ -129,6 +177,12 @@ def main(equipment_id: str, remote: bool = False) -> None:
         "encoding_layers": encoding_layers,
     })
     task.upload_artifact("test_scores", artifact_object=scores_df)
+
+    print("Scoring full dataset for cross-period analysis...")
+    full_df, _, _ = run_preprocessing(df, steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
+    full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
+    task.upload_artifact("full_scores", artifact_object=full_scores)
+    print(f"  Full dataset scored: {len(full_scores)} samples, {full_scores['is_anomaly'].sum()} anomalies")
 
     print("Done! Artifacts saved to ClearML.")
 

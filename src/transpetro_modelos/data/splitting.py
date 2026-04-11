@@ -1,29 +1,33 @@
 from datetime import datetime, timedelta
+from typing import Optional
 import pandas as pd
 
+from datetime import datetime
+from typing import Optional
+import pandas as pd
 
 def temporal_split(
     df: pd.DataFrame,
-    failure_date: datetime,
-    exclusion_days: int = 10,
-    val_fraction: float = 0.2,
+    val_start_date: datetime,
+    val_end_date: datetime,
 ) -> dict[str, pd.DataFrame]:
-    """
-    Split a time-series DataFrame into train/val/test sets.
 
-    - train: data from start to (failure_date - exclusion_days), first (1 - val_fraction)
-    - val:   data from start to (failure_date - exclusion_days), last val_fraction
-    - test:  data from (failure_date - exclusion_days) onward (includes degradation + failure)
-    """
-    cutoff = pd.Timestamp(failure_date) - pd.Timedelta(days=exclusion_days)
+    df = df.copy()
+    df.index = pd.to_datetime(df.index)
 
-    normal_data = df[df.index < cutoff]
-    test_data = df[df.index >= cutoff]
+    dates = df.index.normalize()
 
-    n = len(normal_data)
-    split_idx = int(n * (1 - val_fraction))
+    val_start = pd.Timestamp(val_start_date)
+    val_end = pd.Timestamp(val_end_date)
 
-    train_data = normal_data.iloc[:split_idx]
-    val_data = normal_data.iloc[split_idx:]
+    train_data = df[dates < val_start]
 
-    return {"train": train_data, "val": val_data, "test": test_data}
+    val_data = df[(dates >= val_start) & (dates <= val_end)]
+
+    test_data = df[dates > val_end]
+
+    return {
+        "train": train_data,
+        "val": val_data,
+        "test": test_data
+    }

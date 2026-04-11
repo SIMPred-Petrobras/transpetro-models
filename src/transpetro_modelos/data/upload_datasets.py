@@ -7,7 +7,7 @@ LOCAL_DATA_DIR = Path(__file__).parent.parent.parent.parent / "Dados"
 
 def upload_equipment_dataset(equipment_id: str) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
-    file_path = LOCAL_DATA_DIR / f"{equipment_id}.feather"
+    file_path = LOCAL_DATA_DIR / f"{equipment_id}.csv"
 
     print(f"Uploading {equipment_id} ({file_path.stat().st_size / 1e6:.1f} MB)...")
 
@@ -38,7 +38,6 @@ def upload_metadata() -> None:
 def main() -> None:
     for equipment_id in EQUIPMENT_CONFIGS:
         upload_equipment_dataset(equipment_id)
-    upload_metadata()
     print("\nAll datasets uploaded successfully.")
 
 

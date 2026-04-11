@@ -8,6 +8,9 @@ def filter_running(df: pd.DataFrame, column: str, threshold: float) -> pd.DataFr
     """Remove rows where pump is considered off (column value below threshold)."""
     return df[df[column] > threshold].copy()
 
+def remove_negatives(df: pd.DataFrame, column: str) -> pd.DataFrame:
+    df.loc[df[column] < 1, column] = np.nan
+    return df
 
 def remove_transients(df: pd.DataFrame, minutes: int = 10) -> pd.DataFrame:
     """
@@ -34,6 +37,31 @@ def remove_transients(df: pd.DataFrame, minutes: int = 10) -> pd.DataFrame:
 
     return df[mask].copy()
 
+def clip(
+    df: pd.DataFrame,
+    bounds=None,
+    lower_pct: float = 1.0,
+    upper_pct: float = 99.0,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Clip values to [P_lower, P_upper] per column.
+    If bounds is None, calculates from data (use on train set).
+    Returns (clipped_df, bounds_dict).
+    """
+    if bounds is None:
+        bounds = {}
+        for col in df.columns:
+            bounds[col] = (
+                np.percentile(df[col].dropna(), lower_pct),
+                np.percentile(df[col].dropna(), upper_pct),
+            )
+
+    df = df.copy()
+    for col in df.columns:
+        lo, hi = bounds[col]
+        df[col] = df[col].clip(lo, hi)
+
+    return df, bounds
 
 def normalize(
     df: pd.DataFrame,
@@ -56,25 +84,43 @@ def normalize(
 
     return pd.DataFrame(values, index=df.index, columns=df.columns), scaler
 
-
 def select_features(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     """Select a subset of columns."""
     return df[features].copy()
 
+def interpolate_df(df: pd.DataFrame, method="time", limit=3) -> pd.DataFrame:
+    df = df.interpolate(method=method, limit=limit)
+    return df
 
-def resample(df: pd.DataFrame, freq: str = "5min") -> pd.DataFrame:
-    """Resample time series to a given frequency using mean aggregation."""
-    return df.resample(freq).mean().dropna()
+def remove_sensor_errors(df: pd.DataFrame, error_values: list[float] | None = None) -> pd.DataFrame:
+    """Replace known sensor error codes with NaN (e.g., -25.0 in temperature sensors)."""
+    if error_values is None:
+        error_values = [-25.0]
+    df = df.copy()
+    for val in error_values:
+        df = df.replace(val, np.nan)
+    return df
+
+def resample(df: pd.DataFrame, freq: str = "1h") -> pd.DataFrame:
+    """
+    Resample COV (change-on-value) time series to a regular grid.
+    Uses .last() to preserve the last recorded value in each window.
+    NaN filling is intentionally NOT done here — use the ffill step after split
+    to avoid data leakage between train and test sets.
+    """
+    df = df.resample(freq).last()
+    return df
 
 
 def run_preprocessing(
     df: pd.DataFrame,
     steps: list[dict],
     fitted_scaler=None,
-) -> tuple[pd.DataFrame, object]:
+    fitted_clip_bounds=None,
+) -> tuple[pd.DataFrame, object, dict | None]:
     """
     Execute a preprocessing pipeline defined as a list of step dicts.
-    Returns (processed_df, scaler) — scaler is None if no normalize step.
+    Returns (processed_df, scaler, clip_bounds) — scaler is None if no normalize step, clip_bounds is None if no clip step.
 
     Steps example:
         [
@@ -87,6 +133,7 @@ def run_preprocessing(
     On val/test sets, pass the scaler returned from the train call.
     """
     scaler = fitted_scaler
+    clip_bounds = fitted_clip_bounds
 
     for step_cfg in steps:
         step = step_cfg["step"]
@@ -94,15 +141,23 @@ def run_preprocessing(
 
         if step == "filter_running":
             df = filter_running(df, **params)
+        elif step == "remove_negatives":
+            df = remove_negatives(df, **params)
         elif step == "remove_transients":
             df = remove_transients(df, **params)
         elif step == "normalize":
             df, scaler = normalize(df, scaler=scaler, **params)
+        elif step == "clip":
+            df, clip_bounds = clip(df, bounds=clip_bounds, **params)
         elif step == "select_features":
             df = select_features(df, **params)
+        elif step == "remove_sensor_errors":
+            df = remove_sensor_errors(df, **params)
+        elif step == "interpolate":
+            df = interpolate_df(df, **params)
         elif step == "resample":
             df = resample(df, **params)
         else:
             raise ValueError(f"Unknown preprocessing step: '{step}'")
 
-    return df, scaler
+    return df, scaler, clip_bounds

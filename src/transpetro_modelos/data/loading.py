@@ -20,16 +20,17 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
             dataset_project="Transpetro",
         )
         local_path = ds.get_local_copy()
-        file_path = Path(local_path) / f"{equipment_id}.feather"
+        file_path = Path(local_path) / f"{equipment_id}.csv"
     else:
-        file_path = LOCAL_DATA_DIR / f"{equipment_id}.feather"
+        file_path = LOCAL_DATA_DIR / f"{equipment_id}.csv"
 
-    df = pd.read_feather(file_path)
+    df = pd.read_csv(file_path)
 
     if config.datetime_column is not None:
         df = df.set_index(config.datetime_column)
         df.index = pd.to_datetime(df.index)
     else:
+        df = df.set_index("Timestamp")
         df.index = pd.to_datetime(df.index)
 
     df = df.sort_index()
