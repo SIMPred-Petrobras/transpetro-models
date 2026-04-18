@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -13,8 +14,45 @@ class EquipmentConfig:
     exclusion_days_before: int
     preprocessing_steps: list[dict]
     pre_split_steps: list[dict] = field(default_factory=list)  # resample, filter_running (roda antes do split)
+    preprocess_presets: dict[str, list[dict]] = field(default_factory=dict)
     local_feather: Optional[str] = None  # override path for local loading (relative to project root)
     val_start_date: Optional[datetime] = None  # fixed validation start date (e.g., Jul 1)
+
+
+B4064A_NOVOS_PREPROCESS_PRESETS: dict[str, list[dict]] = {
+    "baseline": [
+        {"step": "ffill", "limit": 6},
+        {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
+        {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+    "moving_average": [
+        {"step": "ffill", "limit": 6},
+        {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
+        {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
+        {"step": "moving_average", "window": 3, "min_periods": 1},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+    "knn": [
+        {"step": "ffill", "limit": 6},
+        {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
+        {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
+        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+    "moving_average_knn": [
+        {"step": "ffill", "limit": 6},
+        {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
+        {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
+        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
+        {"step": "moving_average", "window": 3, "min_periods": 1},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+}
 
 
 EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
@@ -54,14 +92,9 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         pre_split_steps=[
             {"step": "remove_sensor_errors", "error_values": [-25.0]},
             {"step": "resample", "freq": "1h"},
-            {"step": "ffill", "limit": 6},
-            {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
-            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
         ],
-        preprocessing_steps=[
-            {"step": "clip"},
-            {"step": "normalize", "method": "robust"},
-        ],
+        preprocessing_steps=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS["baseline"]),
+        preprocess_presets=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS),
     ),
     "B-8802B": EquipmentConfig(
         equipment_id="B-8802B",
@@ -86,3 +119,17 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         ],
     ),
 }
+
+
+def get_preprocessing_steps(equipment_id: str, preset: str = "baseline") -> list[dict]:
+    config = EQUIPMENT_CONFIGS[equipment_id]
+    if config.preprocess_presets:
+        if preset not in config.preprocess_presets:
+            available = ", ".join(sorted(config.preprocess_presets))
+            raise ValueError(f"Unknown preprocess preset '{preset}' for {equipment_id}. Available: {available}")
+        return deepcopy(config.preprocess_presets[preset])
+
+    if preset != "baseline":
+        raise ValueError(f"Equipment {equipment_id} only supports preprocess_preset='baseline'")
+
+    return deepcopy(config.preprocessing_steps)

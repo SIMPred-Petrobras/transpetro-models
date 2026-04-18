@@ -11,9 +11,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from clearml import Task
-from transpetro_modelos.config import EQUIPMENT_CONFIGS
+from transpetro_modelos.config import EQUIPMENT_CONFIGS, get_preprocessing_steps
 from transpetro_modelos.data.loading import load_equipment_data
-from transpetro_modelos.data.preprocessing import run_preprocessing
+from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder
 from transpetro_modelos.training.train import train_autoencoder, make_dataloader
@@ -30,6 +30,23 @@ def _sensor_slug(sensor_name: str) -> str:
 
 def _build_sensor_steps(base_steps: list[dict], sensor: str) -> list[dict]:
     return [{"step": "select_features", "features": [sensor]}, *base_steps]
+
+
+def _report_to_dict(report) -> dict[str, int]:
+    return {
+        "rows_before": report.rows_before,
+        "rows_after": report.rows_after,
+        "missing_before": report.missing_before,
+        "missing_after": report.missing_after,
+    }
+
+
+def _artifacts_presence(artifacts: PreprocessingArtifacts) -> dict[str, bool]:
+    return {
+        "has_scaler": artifacts.scaler is not None,
+        "has_clip_bounds": artifacts.clip_bounds is not None,
+        "has_knn_imputer": artifacts.knn_imputer is not None,
+    }
 
 
 def _save_artifact_local(local_dir: Path, artifact_name: str, artifact_object) -> Path:
@@ -87,13 +104,21 @@ def main(
     remote: bool = False,
     local_data: bool = False,
     per_sensor: bool = False,
+    preprocess_preset: str = "baseline",
+    queue: str = "default",
     upload_to_clearml: bool = True,
     local_artifacts_dir: str = "artifacts_local",
 ) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
+    base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
 
     Task.add_requirements("pyarrow")
-    task_name = f"autoencoder-{equipment_id}-per-sensor" if per_sensor else f"autoencoder-{equipment_id}"
+    task_suffix = "" if preprocess_preset == "baseline" else f"-{preprocess_preset}"
+    task_name = (
+        f"autoencoder-{equipment_id}-per-sensor{task_suffix}"
+        if per_sensor
+        else f"autoencoder-{equipment_id}{task_suffix}"
+    )
     task = Task.init(
         project_name="Transpetro",
         task_name=task_name,
@@ -112,7 +137,9 @@ def main(
         "threshold_percentile": 95.0,
         "weight_decay": 1e-5,
         "pre_split_steps": config.pre_split_steps,
-        "preprocessing_steps": config.preprocessing_steps,
+        "preprocessing_steps": base_steps,
+        "preprocess_preset": preprocess_preset,
+        "queue": queue,
         "val_start_date": config.val_start_date.isoformat() if config.val_start_date else None,
         "per_sensor_mode": per_sensor,
         "upload_to_clearml": upload_to_clearml,
@@ -121,7 +148,7 @@ def main(
     task.connect(hparams)
 
     if remote:
-        task.execute_remotely(queue_name="default")
+        task.execute_remotely(queue_name=queue)
     # Everything below runs on the server when remote=True
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -135,7 +162,7 @@ def main(
     # 2. Pre-split preprocessing (resample, filter_running) — runs on full dataset
     pre_steps = hparams["pre_split_steps"]
     if pre_steps:
-        df, _, _ = run_preprocessing(df, pre_steps, fitted_scaler=None)
+        df, _, _ = run_preprocessing(df, pre_steps)
         print(f"  After pre-split preprocessing: {df.shape}")
 
     # 3. Split
@@ -167,18 +194,25 @@ def main(
             print(f"\n=== Sensor: {sensor} ===")
 
             # Post-split preprocessing (fit on train only, reuse on val/test)
-            train_df, scaler, clip_bounds = run_preprocessing(splits["train"], steps, fitted_scaler=None)
-            val_df, _, _ = run_preprocessing(
+            train_df, artifacts, train_report = run_preprocessing(
+                splits["train"],
+                steps,
+                return_artifacts=True,
+                return_report=True,
+            )
+            val_df, _, val_report = run_preprocessing(
                 splits["val"],
                 steps,
-                fitted_scaler=scaler,
-                fitted_clip_bounds=clip_bounds,
+                fitted_artifacts=artifacts,
+                return_artifacts=True,
+                return_report=True,
             )
-            test_df, _, _ = run_preprocessing(
+            test_df, _, test_report = run_preprocessing(
                 splits["test"],
                 steps,
-                fitted_scaler=scaler,
-                fitted_clip_bounds=clip_bounds,
+                fitted_artifacts=artifacts,
+                return_artifacts=True,
+                return_report=True,
             )
 
             n_features = train_df.shape[1]
@@ -208,7 +242,7 @@ def main(
             print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
 
             test_scores = score_test_set(model, test_df, threshold=threshold, device=device)
-            full_df, _, _ = run_preprocessing(df, steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
+            full_df = pd.concat([train_df, val_df, test_df]).sort_index()
             full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
 
             # Per-sensor scalar tracking
@@ -231,6 +265,14 @@ def main(
                 "n_test_samples": len(test_errors),
                 "n_features": n_features,
                 "encoding_layers": encoding_layers,
+                "preprocess_preset": preprocess_preset,
+                "preprocessing_steps": steps,
+                "split_reports": {
+                    "train": _report_to_dict(train_report),
+                    "val": _report_to_dict(val_report),
+                    "test": _report_to_dict(test_report),
+                },
+                "preprocessing_artifacts": _artifacts_presence(artifacts),
             }
 
             _publish_artifact(
@@ -243,15 +285,23 @@ def main(
             _publish_artifact(
                 task,
                 f"scaler__{slug}",
-                scaler,
+                artifacts.scaler,
                 local_dir=local_task_dir / "per_sensor",
                 upload_to_clearml=upload_to_clearml,
             )
-            if clip_bounds:
+            if artifacts.clip_bounds:
                 _publish_artifact(
                     task,
                     f"clip_bounds__{slug}",
-                    clip_bounds,
+                    artifacts.clip_bounds,
+                    local_dir=local_task_dir / "per_sensor",
+                    upload_to_clearml=upload_to_clearml,
+                )
+            if artifacts.knn_imputer is not None:
+                _publish_artifact(
+                    task,
+                    f"knn_imputer__{slug}",
+                    artifacts.knn_imputer,
                     local_dir=local_task_dir / "per_sensor",
                     upload_to_clearml=upload_to_clearml,
                 )
@@ -303,9 +353,26 @@ def main(
 
     # Default multivariate mode
     steps = base_steps
-    train_df, scaler, clip_bounds = run_preprocessing(splits["train"], steps, fitted_scaler=None)
-    val_df, _, _ = run_preprocessing(splits["val"], steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
-    test_df, _, _ = run_preprocessing(splits["test"], steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
+    train_df, artifacts, train_report = run_preprocessing(
+        splits["train"],
+        steps,
+        return_artifacts=True,
+        return_report=True,
+    )
+    val_df, _, val_report = run_preprocessing(
+        splits["val"],
+        steps,
+        fitted_artifacts=artifacts,
+        return_artifacts=True,
+        return_report=True,
+    )
+    test_df, _, test_report = run_preprocessing(
+        splits["test"],
+        steps,
+        fitted_artifacts=artifacts,
+        return_artifacts=True,
+        return_report=True,
+    )
 
     n_features = train_df.shape[1]
     encoding_layers = hparams["encoding_layers"]
@@ -341,6 +408,9 @@ def main(
     logger.report_scalar("metrics", "train_mse_mean", float(train_errors.mean()), 0)
     logger.report_scalar("metrics", "test_mse_mean", float(test_errors.mean()), 0)
     logger.report_scalar("metrics", "n_anomalies", n_anomalies, 0)
+    logger.report_scalar("rows", "train_after_preprocessing", train_report.rows_after, 0)
+    logger.report_scalar("rows", "val_after_preprocessing", val_report.rows_after, 0)
+    logger.report_scalar("rows", "test_after_preprocessing", test_report.rows_after, 0)
 
     model_path = f"model_{equipment_id}.pt"
     torch.save(model.state_dict(), model_path)
@@ -354,15 +424,23 @@ def main(
     _publish_artifact(
         task,
         "scaler",
-        scaler,
+        artifacts.scaler,
         local_dir=local_task_dir,
         upload_to_clearml=upload_to_clearml,
     )
-    if clip_bounds:
+    if artifacts.clip_bounds:
         _publish_artifact(
             task,
             "clip_bounds",
-            clip_bounds,
+            artifacts.clip_bounds,
+            local_dir=local_task_dir,
+            upload_to_clearml=upload_to_clearml,
+        )
+    if artifacts.knn_imputer is not None:
+        _publish_artifact(
+            task,
+            "knn_imputer",
+            artifacts.knn_imputer,
             local_dir=local_task_dir,
             upload_to_clearml=upload_to_clearml,
         )
@@ -379,6 +457,17 @@ def main(
             "n_test_samples": len(test_errors),
             "n_features": n_features,
             "encoding_layers": encoding_layers,
+            "preprocess_preset": preprocess_preset,
+            "preprocessing_steps": steps,
+            "train_rows": train_report.rows_after,
+            "val_rows": val_report.rows_after,
+            "test_rows": test_report.rows_after,
+            "split_reports": {
+                "train": _report_to_dict(train_report),
+                "val": _report_to_dict(val_report),
+                "test": _report_to_dict(test_report),
+            },
+            "preprocessing_artifacts": _artifacts_presence(artifacts),
         },
         local_dir=local_task_dir,
         upload_to_clearml=upload_to_clearml,
@@ -392,7 +481,7 @@ def main(
     )
 
     print("Scoring full dataset for cross-period analysis...")
-    full_df, _, _ = run_preprocessing(df, steps, fitted_scaler=scaler, fitted_clip_bounds=clip_bounds)
+    full_df = pd.concat([train_df, val_df, test_df]).sort_index()
     full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
     _publish_artifact(
         task,
@@ -413,8 +502,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--equipment", required=True, choices=list(EQUIPMENT_CONFIGS.keys()))
     parser.add_argument("--remote", action="store_true", help="Submit to ClearML queue for remote execution")
+    parser.add_argument("--queue", default="default", help="ClearML queue name when using --remote")
     parser.add_argument("--local-data", action="store_true", help="Load data from local files instead of ClearML")
     parser.add_argument("--per-sensor", action="store_true", help="Train one model per sensor in a single task")
+    parser.add_argument(
+        "--preprocess-preset",
+        default="baseline",
+        help="Preprocessing preset to use (baseline, moving_average, knn, moving_average_knn for B-4064A-novos)",
+    )
     parser.add_argument(
         "--no-clearml-upload",
         action="store_true",
@@ -431,6 +526,8 @@ if __name__ == "__main__":
         remote=args.remote,
         local_data=args.local_data,
         per_sensor=args.per_sensor,
+        preprocess_preset=args.preprocess_preset,
+        queue=args.queue,
         upload_to_clearml=not args.no_clearml_upload,
         local_artifacts_dir=args.local_artifacts_dir,
     )

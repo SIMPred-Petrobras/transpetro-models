@@ -1,7 +1,23 @@
+from dataclasses import dataclass
 import pandas as pd
 import numpy as np
+from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
-from typing import Optional
+
+
+@dataclass
+class PreprocessingArtifacts:
+    scaler: object | None = None
+    clip_bounds: dict | None = None
+    knn_imputer: KNNImputer | None = None
+
+
+@dataclass
+class PreprocessingReport:
+    rows_before: int
+    rows_after: int
+    missing_before: int
+    missing_after: int
 
 
 def filter_running(df: pd.DataFrame, column: str, threshold: float) -> pd.DataFrame:
@@ -118,12 +134,48 @@ def ffill(df: pd.DataFrame, limit: int = 4) -> pd.DataFrame:
     return df.ffill(limit=limit).dropna()
 
 
+def moving_average(
+    df: pd.DataFrame,
+    window: int = 3,
+    min_periods: int = 1,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Apply a causal rolling mean to selected columns."""
+    if columns is None:
+        columns = list(df.columns)
+
+    df = df.copy()
+    df[columns] = df[columns].rolling(window=window, min_periods=min_periods, center=False).mean()
+    return df
+
+
+def knn_impute(
+    df: pd.DataFrame,
+    imputer: KNNImputer | None = None,
+    n_neighbors: int = 3,
+    weights: str = "distance",
+    metric: str = "nan_euclidean",
+) -> tuple[pd.DataFrame, KNNImputer]:
+    """Impute missing values using KNN, fitting only when imputer is None."""
+    if imputer is None:
+        imputer = KNNImputer(n_neighbors=n_neighbors, weights=weights, metric=metric)
+        values = imputer.fit_transform(df.values)
+    else:
+        values = imputer.transform(df.values)
+
+    return pd.DataFrame(values, index=df.index, columns=df.columns), imputer
+
+
 def run_preprocessing(
     df: pd.DataFrame,
     steps: list[dict],
+    fitted_artifacts: PreprocessingArtifacts | None = None,
     fitted_scaler=None,
     fitted_clip_bounds=None,
-) -> tuple[pd.DataFrame, object, dict | None]:
+    fitted_knn_imputer: KNNImputer | None = None,
+    return_artifacts: bool = False,
+    return_report: bool = False,
+):
     """
     Execute a preprocessing pipeline defined as a list of step dicts.
     Returns (processed_df, scaler, clip_bounds).
@@ -139,8 +191,17 @@ def run_preprocessing(
     On the train set, pass fitted_scaler=None and fitted_clip_bounds=None.
     On val/test sets, pass the scaler and clip_bounds returned from the train call.
     """
-    scaler = fitted_scaler
-    clip_bounds = fitted_clip_bounds
+    artifacts = fitted_artifacts or PreprocessingArtifacts(
+        scaler=fitted_scaler,
+        clip_bounds=fitted_clip_bounds,
+        knn_imputer=fitted_knn_imputer,
+    )
+    report = PreprocessingReport(
+        rows_before=len(df),
+        rows_after=0,
+        missing_before=int(df.isna().sum().sum()),
+        missing_after=0,
+    )
 
     for step_cfg in steps:
         step = step_cfg["step"]
@@ -151,18 +212,31 @@ def run_preprocessing(
         elif step == "remove_transients":
             df = remove_transients(df, **params)
         elif step == "normalize":
-            df, scaler = normalize(df, scaler=scaler, **params)
+            df, artifacts.scaler = normalize(df, scaler=artifacts.scaler, **params)
         elif step == "clip":
-            df, clip_bounds = clip(df, bounds=clip_bounds, **params)
+            df, artifacts.clip_bounds = clip(df, bounds=artifacts.clip_bounds, **params)
         elif step == "select_features":
             df = select_features(df, **params)
         elif step == "resample":
             df = resample(df, **params)
         elif step == "ffill":
             df = ffill(df, **params)
+        elif step == "moving_average":
+            df = moving_average(df, **params)
+        elif step == "knn_impute":
+            df, artifacts.knn_imputer = knn_impute(df, imputer=artifacts.knn_imputer, **params)
         elif step == "remove_sensor_errors":
             df = remove_sensor_errors(df, **params)
         else:
             raise ValueError(f"Unknown preprocessing step: '{step}'")
 
-    return df, scaler, clip_bounds
+    report.rows_after = len(df)
+    report.missing_after = int(df.isna().sum().sum())
+
+    if return_artifacts and return_report:
+        return df, artifacts, report
+    if return_artifacts:
+        return df, artifacts
+    if return_report:
+        return df, artifacts.scaler, artifacts.clip_bounds, report
+    return df, artifacts.scaler, artifacts.clip_bounds
