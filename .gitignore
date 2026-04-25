@@ -6,7 +6,9 @@ __pycache__/
 .env
 *.pt
 artifacts/
+artifacts_local/
 *.egg-info/
 .claude/
 .codex/
 .codex
+Dados-novos/
