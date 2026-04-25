@@ -57,6 +57,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "remove_transients", "minutes": 10},
         ],
         preprocessing_steps = [
+            {"step": "clip"},
             {"step": "normalize", "method": "standard"}
         ]  
     ),
