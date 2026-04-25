@@ -5,6 +5,48 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 
+def compute_reconstruction_errors_sequence(
+    model: torch.nn.Module,
+    df: pd.DataFrame,
+    seq_len: int,
+    batch_size: int = 512,
+    device: str = "cpu",
+) -> np.ndarray:
+    """Per-window MSE for sequence models (LSTM). Returns one error per window."""
+    model.eval()
+    data = df.values.astype("float32")
+    windows = np.stack([data[i : i + seq_len] for i in range(len(data) - seq_len + 1)])
+    tensor = torch.tensor(windows, dtype=torch.float32).to(device)
+    dataset = TensorDataset(tensor)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    errors = []
+    with torch.no_grad():
+        for (batch,) in loader:
+            reconstructed, _ = model(batch)
+            mse = F.mse_loss(reconstructed, batch, reduction="none").mean(dim=[1, 2])
+            errors.extend(mse.cpu().numpy())
+
+    return np.array(errors)
+
+
+def score_test_set_sequence(
+    model: torch.nn.Module,
+    df: pd.DataFrame,
+    seq_len: int,
+    threshold: float,
+    batch_size: int = 512,
+    device: str = "cpu",
+) -> pd.DataFrame:
+    """Score a DataFrame using a sequence model. Error is assigned to the last timestamp of each window."""
+    errors = compute_reconstruction_errors_sequence(model, df, seq_len, batch_size, device)
+    timestamps = df.index[seq_len - 1 :]
+    return pd.DataFrame(
+        {"reconstruction_error": errors, "is_anomaly": errors > threshold},
+        index=timestamps,
+    )
+
+
 def compute_reconstruction_errors(
     model: torch.nn.Module,
     df: pd.DataFrame,

@@ -21,7 +21,10 @@ class PreprocessingReport:
 
 
 def filter_running(df: pd.DataFrame, column: str, threshold: float) -> pd.DataFrame:
-    """Remove rows where pump is considered off (column value below threshold)."""
+    """Remove rows where pump is considered off (column value below threshold).
+    If column is not present (e.g. per-sensor mode), returns df unchanged."""
+    if column not in df.columns:
+        return df
     return df[df[column] > threshold].copy()
 
 

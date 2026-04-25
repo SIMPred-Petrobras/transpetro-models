@@ -16,6 +16,20 @@ def make_dataloader(
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
+def make_sequence_dataloader(
+    df,
+    seq_len: int,
+    batch_size: int,
+    shuffle: bool = True,
+    device: str = "cpu",
+) -> DataLoader:
+    data = df.values.astype("float32")
+    windows = np.stack([data[i : i + seq_len] for i in range(len(data) - seq_len + 1)])
+    tensor = torch.tensor(windows, dtype=torch.float32).to(device)
+    dataset = TensorDataset(tensor)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
 def train_autoencoder(
     model: torch.nn.Module,
     train_loader: DataLoader,

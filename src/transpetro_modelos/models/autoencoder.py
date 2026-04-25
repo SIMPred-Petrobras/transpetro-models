@@ -12,6 +12,34 @@ def _default_encoding_layers(input_dim: int) -> list[int]:
         return [64, 32, 16]
 
 
+class LSTMAutoencoder(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 64,
+        num_layers: int = 2,
+        seq_len: int = 24,
+    ):
+        super().__init__()
+        self.seq_len = seq_len
+        self.num_layers = num_layers
+
+        self.encoder = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+        self.decoder = nn.LSTM(hidden_dim, hidden_dim, num_layers, batch_first=True)
+        self.output_layer = nn.Linear(hidden_dim, input_dim)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # x: [batch, seq_len, input_dim]
+        _, (h_n, _) = self.encoder(x)
+        bottleneck = h_n[-1]  # [batch, hidden_dim]
+
+        dec_input = bottleneck.unsqueeze(1).expand(-1, self.seq_len, -1)
+        dec_output, _ = self.decoder(dec_input)         # [batch, seq_len, hidden_dim]
+        reconstructed = self.output_layer(dec_output)   # [batch, seq_len, input_dim]
+
+        return reconstructed, bottleneck
+
+
 class DenseAutoencoder(nn.Module):
     def __init__(self, input_dim: int, encoding_layers: Optional[list[int]] = None):
         super().__init__()

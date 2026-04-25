@@ -15,12 +15,14 @@ from transpetro_modelos.config import EQUIPMENT_CONFIGS, get_preprocessing_steps
 from transpetro_modelos.data.loading import load_equipment_data
 from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
-from transpetro_modelos.models.autoencoder import DenseAutoencoder
-from transpetro_modelos.training.train import train_autoencoder, make_dataloader
+from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
+from transpetro_modelos.training.train import train_autoencoder, make_dataloader, make_sequence_dataloader
 from transpetro_modelos.training.evaluate import (
     compute_reconstruction_errors,
+    compute_reconstruction_errors_sequence,
     determine_threshold,
     score_test_set,
+    score_test_set_sequence,
 )
 
 
@@ -108,16 +110,19 @@ def main(
     queue: str = "default",
     upload_to_clearml: bool = True,
     local_artifacts_dir: str = "artifacts_local",
+    model_type: str = "dense",
+    seq_len: int = 24,
 ) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
     base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
 
     Task.add_requirements("pyarrow")
+    model_suffix = "" if model_type == "dense" else f"-{model_type}"
     task_suffix = "" if preprocess_preset == "baseline" else f"-{preprocess_preset}"
     task_name = (
-        f"autoencoder-{equipment_id}-per-sensor{task_suffix}"
+        f"autoencoder-{equipment_id}-per-sensor{task_suffix}{model_suffix}"
         if per_sensor
-        else f"autoencoder-{equipment_id}{task_suffix}"
+        else f"autoencoder-{equipment_id}{task_suffix}{model_suffix}"
     )
     task = Task.init(
         project_name="Transpetro",
@@ -144,6 +149,8 @@ def main(
         "per_sensor_mode": per_sensor,
         "upload_to_clearml": upload_to_clearml,
         "local_artifacts_dir": local_artifacts_dir,
+        "model_type": model_type,
+        "seq_len": seq_len,
     }
     task.connect(hparams)
 
@@ -217,11 +224,19 @@ def main(
 
             n_features = train_df.shape[1]
             encoding_layers = hparams["encoding_layers"]
-            model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
-            print(f"  Model input_dim={n_features}, encoding_layers={encoding_layers}")
+            use_lstm = hparams["model_type"] == "lstm"
+            _seq_len = hparams["seq_len"]
 
-            train_loader = make_dataloader(train_df, batch_size=hparams["batch_size"], shuffle=True, device=device)
-            val_loader = make_dataloader(val_df, batch_size=hparams["batch_size"], shuffle=False, device=device)
+            if use_lstm:
+                model = LSTMAutoencoder(input_dim=n_features, seq_len=_seq_len).to(device)
+                print(f"  Model LSTM input_dim={n_features}, seq_len={_seq_len}")
+                train_loader = make_sequence_dataloader(train_df, seq_len=_seq_len, batch_size=hparams["batch_size"], shuffle=True, device=device)
+                val_loader = make_sequence_dataloader(val_df, seq_len=_seq_len, batch_size=hparams["batch_size"], shuffle=False, device=device)
+            else:
+                model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
+                print(f"  Model Dense input_dim={n_features}, encoding_layers={encoding_layers}")
+                train_loader = make_dataloader(train_df, batch_size=hparams["batch_size"], shuffle=True, device=device)
+                val_loader = make_dataloader(val_df, batch_size=hparams["batch_size"], shuffle=False, device=device)
 
             print("  Training...")
             model = train_autoencoder(
@@ -235,15 +250,24 @@ def main(
                 logger=None,
             )
 
-            train_errors = compute_reconstruction_errors(model, train_df, device=device)
-            test_errors = compute_reconstruction_errors(model, test_df, device=device)
+            if use_lstm:
+                train_errors = compute_reconstruction_errors_sequence(model, train_df, seq_len=_seq_len, device=device)
+                test_errors = compute_reconstruction_errors_sequence(model, test_df, seq_len=_seq_len, device=device)
+            else:
+                train_errors = compute_reconstruction_errors(model, train_df, device=device)
+                test_errors = compute_reconstruction_errors(model, test_df, device=device)
             threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
             n_anomalies = int((test_errors > threshold).sum())
             print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
 
-            test_scores = score_test_set(model, test_df, threshold=threshold, device=device)
-            full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-            full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
+            if use_lstm:
+                test_scores = score_test_set_sequence(model, test_df, seq_len=_seq_len, threshold=threshold, device=device)
+                full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+                full_scores = score_test_set_sequence(model, full_df, seq_len=_seq_len, threshold=threshold, device=device)
+            else:
+                test_scores = score_test_set(model, test_df, threshold=threshold, device=device)
+                full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+                full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
 
             # Per-sensor scalar tracking
             logger.report_scalar("metrics_per_sensor", f"{sensor}/threshold", threshold, 0)
@@ -376,12 +400,19 @@ def main(
 
     n_features = train_df.shape[1]
     encoding_layers = hparams["encoding_layers"]
+    use_lstm = hparams["model_type"] == "lstm"
+    _seq_len = hparams["seq_len"]
 
-    model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
-    print(f"  Model input_dim={n_features}, encoding_layers={encoding_layers}")
-
-    train_loader = make_dataloader(train_df, batch_size=hparams["batch_size"], shuffle=True, device=device)
-    val_loader = make_dataloader(val_df, batch_size=hparams["batch_size"], shuffle=False, device=device)
+    if use_lstm:
+        model = LSTMAutoencoder(input_dim=n_features, seq_len=_seq_len).to(device)
+        print(f"  Model LSTM input_dim={n_features}, seq_len={_seq_len}")
+        train_loader = make_sequence_dataloader(train_df, seq_len=_seq_len, batch_size=hparams["batch_size"], shuffle=True, device=device)
+        val_loader = make_sequence_dataloader(val_df, seq_len=_seq_len, batch_size=hparams["batch_size"], shuffle=False, device=device)
+    else:
+        model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
+        print(f"  Model Dense input_dim={n_features}, encoding_layers={encoding_layers}")
+        train_loader = make_dataloader(train_df, batch_size=hparams["batch_size"], shuffle=True, device=device)
+        val_loader = make_dataloader(val_df, batch_size=hparams["batch_size"], shuffle=False, device=device)
 
     print("Training...")
     model = train_autoencoder(
@@ -395,14 +426,21 @@ def main(
         logger=logger,
     )
 
-    train_errors = compute_reconstruction_errors(model, train_df, device=device)
-    test_errors = compute_reconstruction_errors(model, test_df, device=device)
+    if use_lstm:
+        train_errors = compute_reconstruction_errors_sequence(model, train_df, seq_len=_seq_len, device=device)
+        test_errors = compute_reconstruction_errors_sequence(model, test_df, seq_len=_seq_len, device=device)
+    else:
+        train_errors = compute_reconstruction_errors(model, train_df, device=device)
+        test_errors = compute_reconstruction_errors(model, test_df, device=device)
     threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
 
     n_anomalies = int((test_errors > threshold).sum())
     print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
 
-    scores_df = score_test_set(model, test_df, threshold=threshold, device=device)
+    if use_lstm:
+        scores_df = score_test_set_sequence(model, test_df, seq_len=_seq_len, threshold=threshold, device=device)
+    else:
+        scores_df = score_test_set(model, test_df, threshold=threshold, device=device)
 
     logger.report_scalar("metrics", "threshold", threshold, 0)
     logger.report_scalar("metrics", "train_mse_mean", float(train_errors.mean()), 0)
@@ -482,7 +520,10 @@ def main(
 
     print("Scoring full dataset for cross-period analysis...")
     full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-    full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
+    if use_lstm:
+        full_scores = score_test_set_sequence(model, full_df, seq_len=_seq_len, threshold=threshold, device=device)
+    else:
+        full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
     _publish_artifact(
         task,
         "full_scores",
@@ -520,6 +561,18 @@ if __name__ == "__main__":
         default="artifacts_local",
         help="Diretorio base para salvar artifacts localmente",
     )
+    parser.add_argument(
+        "--model",
+        default="dense",
+        choices=["dense", "lstm"],
+        help="Arquitetura do autoencoder: dense (padrao) ou lstm",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=24,
+        help="Tamanho da janela temporal para o LSTM Autoencoder (default: 24h)",
+    )
     args = parser.parse_args()
     main(
         args.equipment,
@@ -530,4 +583,6 @@ if __name__ == "__main__":
         queue=args.queue,
         upload_to_clearml=not args.no_clearml_upload,
         local_artifacts_dir=args.local_artifacts_dir,
+        model_type=args.model,
+        seq_len=args.seq_len,
     )
