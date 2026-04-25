@@ -7,6 +7,7 @@ LOCAL_DATA_DIR = Path(__file__).parent.parent.parent.parent / "Dados"
 
 def upload_equipment_dataset(equipment_id: str) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
+    print(config)
     file_path = LOCAL_DATA_DIR / f"{equipment_id}.csv"
 
     print(f"Uploading {equipment_id} ({file_path.stat().st_size / 1e6:.1f} MB)...")
@@ -26,13 +27,13 @@ def upload_metadata() -> None:
     print(f"Uploading metadata (falhas.xlsx)...")
 
     ds = Dataset.create(
-        dataset_name="transpetro-metadata",
+        dataset_name="transpetro-metadata_interpolated",
         dataset_project="Transpetro",
     )
     ds.add_files(str(file_path))
     ds.upload()
     ds.finalize()
-    print(f"  Done: transpetro-metadata (ID: {ds.id})")
+    print(f"  Done: {ds.dataset_name} (ID: {ds.id})")
 
 
 def main() -> None:

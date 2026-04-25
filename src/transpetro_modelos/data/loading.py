@@ -30,7 +30,7 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
         df = df.set_index(config.datetime_column)
         df.index = pd.to_datetime(df.index)
     else:
-        df = df.set_index("Timestamp")
+        df = df.set_index("datetime")
         df.index = pd.to_datetime(df.index)
 
     df = df.sort_index()

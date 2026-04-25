@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from typing import Optional
 
@@ -111,12 +112,41 @@ def resample(df: pd.DataFrame, freq: str = "1h") -> pd.DataFrame:
     df = df.resample(freq).last()
     return df
 
+def smooth_moving_average(
+    df: pd.DataFrame,
+    window: int = 3,
+    min_periods: int = 1,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Apply a causal rolling mean to selected columns."""
+    if columns is None:
+        columns = list(df.columns)
+
+    df = df.copy()
+    df[columns] = df[columns].rolling(window=window, min_periods=min_periods, center=False).mean()
+    return df
+
+def knn_impute(
+    df: pd.DataFrame,
+    imputer: KNNImputer | None = None,
+    n_neighbors: int = 3,
+    weights: str = "distance",
+    metric: str = "nan_euclidean",
+) -> tuple[pd.DataFrame, KNNImputer]:
+    """Impute missing values using KNN, fitting only when imputer is None."""
+    if imputer is None:
+        imputer = KNNImputer(n_neighbors=n_neighbors, weights=weights, metric=metric)
+        values = imputer.fit_transform(df.values)
+    else:
+        values = imputer.transform(df.values)
+
+    return pd.DataFrame(values, index=df.index, columns=df.columns)
 
 def run_preprocessing(
     df: pd.DataFrame,
     steps: list[dict],
     fitted_scaler=None,
-    fitted_clip_bounds=None,
+    fitted_clip_bounds=None
 ) -> tuple[pd.DataFrame, object, dict | None]:
     """
     Execute a preprocessing pipeline defined as a list of step dicts.
@@ -134,6 +164,7 @@ def run_preprocessing(
     """
     scaler = fitted_scaler
     clip_bounds = fitted_clip_bounds
+
 
     for step_cfg in steps:
         step = step_cfg["step"]
@@ -157,6 +188,10 @@ def run_preprocessing(
             df = interpolate_df(df, **params)
         elif step == "resample":
             df = resample(df, **params)
+        elif step == "smooth_moving_average":
+            df = smooth_moving_average(df, **params)
+        elif step == "knn_impute":
+            df = knn_impute(df, **params)
         else:
             raise ValueError(f"Unknown preprocessing step: '{step}'")
 
