@@ -35,8 +35,9 @@ def main(equipment_id: str, remote: bool = False) -> None:
         project_name="Transpetro",
         task_name=f"autoencoder-{equipment_id}",
         output_uri=True,
+        reuse_last_task_id=False
     )
-    task.set_base_docker("nvidia/cuda:12.9.1-cudnn-runtime-ubuntu22.04")
+    task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
 
     hparams = {
         "equipment_id": equipment_id,
