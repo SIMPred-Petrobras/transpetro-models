@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+from transpetro_modelos.training.train import make_windows
+
 
 def compute_reconstruction_errors_sequence(
     model: torch.nn.Module,
@@ -14,8 +16,7 @@ def compute_reconstruction_errors_sequence(
 ) -> np.ndarray:
     """Per-window MSE for sequence models (LSTM). Returns one error per window."""
     model.eval()
-    data = df.values.astype("float32")
-    windows = np.stack([data[i : i + seq_len] for i in range(len(data) - seq_len + 1)])
+    windows = make_windows(df.values.astype("float32"), seq_len)
     tensor = torch.tensor(windows, dtype=torch.float32).to(device)
     dataset = TensorDataset(tensor)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)

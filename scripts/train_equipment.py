@@ -30,6 +30,43 @@ def _sensor_slug(sensor_name: str) -> str:
     return re.sub(r"[^0-9a-zA-Z]+", "_", sensor_name).strip("_").lower()
 
 
+def _build_model_and_loaders(n_features, encoding_layers, train_df, val_df, hparams, device):
+    use_lstm = hparams["model_type"] == "lstm"
+    seq_len = hparams["seq_len"]
+    batch_size = hparams["batch_size"]
+    if use_lstm:
+        model = LSTMAutoencoder(input_dim=n_features, seq_len=seq_len).to(device)
+        print(f"  Model LSTM input_dim={n_features}, seq_len={seq_len}")
+        train_loader = make_sequence_dataloader(train_df, seq_len=seq_len, batch_size=batch_size, shuffle=True, device=device)
+        val_loader = make_sequence_dataloader(val_df, seq_len=seq_len, batch_size=batch_size, shuffle=False, device=device)
+    else:
+        model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
+        print(f"  Model Dense input_dim={n_features}, encoding_layers={encoding_layers}")
+        train_loader = make_dataloader(train_df, batch_size=batch_size, shuffle=True, device=device)
+        val_loader = make_dataloader(val_df, batch_size=batch_size, shuffle=False, device=device)
+    return model, train_loader, val_loader
+
+
+def _compute_errors(model, train_df, test_df, hparams, device):
+    use_lstm = hparams["model_type"] == "lstm"
+    seq_len = hparams["seq_len"]
+    if use_lstm:
+        return (
+            compute_reconstruction_errors_sequence(model, train_df, seq_len=seq_len, device=device),
+            compute_reconstruction_errors_sequence(model, test_df, seq_len=seq_len, device=device),
+        )
+    return (
+        compute_reconstruction_errors(model, train_df, device=device),
+        compute_reconstruction_errors(model, test_df, device=device),
+    )
+
+
+def _score_df(model, df, threshold, hparams, device):
+    if hparams["model_type"] == "lstm":
+        return score_test_set_sequence(model, df, seq_len=hparams["seq_len"], threshold=threshold, device=device)
+    return score_test_set(model, df, threshold=threshold, device=device)
+
+
 def _build_sensor_steps(base_steps: list[dict], sensor: str) -> list[dict]:
     return [{"step": "select_features", "features": [sensor]}, *base_steps]
 
@@ -224,19 +261,9 @@ def main(
 
             n_features = train_df.shape[1]
             encoding_layers = hparams["encoding_layers"]
-            use_lstm = hparams["model_type"] == "lstm"
-            _seq_len = hparams["seq_len"]
-
-            if use_lstm:
-                model = LSTMAutoencoder(input_dim=n_features, seq_len=_seq_len).to(device)
-                print(f"  Model LSTM input_dim={n_features}, seq_len={_seq_len}")
-                train_loader = make_sequence_dataloader(train_df, seq_len=_seq_len, batch_size=hparams["batch_size"], shuffle=True, device=device)
-                val_loader = make_sequence_dataloader(val_df, seq_len=_seq_len, batch_size=hparams["batch_size"], shuffle=False, device=device)
-            else:
-                model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
-                print(f"  Model Dense input_dim={n_features}, encoding_layers={encoding_layers}")
-                train_loader = make_dataloader(train_df, batch_size=hparams["batch_size"], shuffle=True, device=device)
-                val_loader = make_dataloader(val_df, batch_size=hparams["batch_size"], shuffle=False, device=device)
+            model, train_loader, val_loader = _build_model_and_loaders(
+                n_features, encoding_layers, train_df, val_df, hparams, device
+            )
 
             print("  Training...")
             model = train_autoencoder(
@@ -250,24 +277,14 @@ def main(
                 logger=None,
             )
 
-            if use_lstm:
-                train_errors = compute_reconstruction_errors_sequence(model, train_df, seq_len=_seq_len, device=device)
-                test_errors = compute_reconstruction_errors_sequence(model, test_df, seq_len=_seq_len, device=device)
-            else:
-                train_errors = compute_reconstruction_errors(model, train_df, device=device)
-                test_errors = compute_reconstruction_errors(model, test_df, device=device)
+            train_errors, test_errors = _compute_errors(model, train_df, test_df, hparams, device)
             threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
             n_anomalies = int((test_errors > threshold).sum())
             print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
 
-            if use_lstm:
-                test_scores = score_test_set_sequence(model, test_df, seq_len=_seq_len, threshold=threshold, device=device)
-                full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-                full_scores = score_test_set_sequence(model, full_df, seq_len=_seq_len, threshold=threshold, device=device)
-            else:
-                test_scores = score_test_set(model, test_df, threshold=threshold, device=device)
-                full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-                full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
+            full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+            test_scores = _score_df(model, test_df, threshold, hparams, device)
+            full_scores = _score_df(model, full_df, threshold, hparams, device)
 
             # Per-sensor scalar tracking
             logger.report_scalar("metrics_per_sensor", f"{sensor}/threshold", threshold, 0)
@@ -400,19 +417,9 @@ def main(
 
     n_features = train_df.shape[1]
     encoding_layers = hparams["encoding_layers"]
-    use_lstm = hparams["model_type"] == "lstm"
-    _seq_len = hparams["seq_len"]
-
-    if use_lstm:
-        model = LSTMAutoencoder(input_dim=n_features, seq_len=_seq_len).to(device)
-        print(f"  Model LSTM input_dim={n_features}, seq_len={_seq_len}")
-        train_loader = make_sequence_dataloader(train_df, seq_len=_seq_len, batch_size=hparams["batch_size"], shuffle=True, device=device)
-        val_loader = make_sequence_dataloader(val_df, seq_len=_seq_len, batch_size=hparams["batch_size"], shuffle=False, device=device)
-    else:
-        model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
-        print(f"  Model Dense input_dim={n_features}, encoding_layers={encoding_layers}")
-        train_loader = make_dataloader(train_df, batch_size=hparams["batch_size"], shuffle=True, device=device)
-        val_loader = make_dataloader(val_df, batch_size=hparams["batch_size"], shuffle=False, device=device)
+    model, train_loader, val_loader = _build_model_and_loaders(
+        n_features, encoding_layers, train_df, val_df, hparams, device
+    )
 
     print("Training...")
     model = train_autoencoder(
@@ -426,21 +433,13 @@ def main(
         logger=logger,
     )
 
-    if use_lstm:
-        train_errors = compute_reconstruction_errors_sequence(model, train_df, seq_len=_seq_len, device=device)
-        test_errors = compute_reconstruction_errors_sequence(model, test_df, seq_len=_seq_len, device=device)
-    else:
-        train_errors = compute_reconstruction_errors(model, train_df, device=device)
-        test_errors = compute_reconstruction_errors(model, test_df, device=device)
+    train_errors, test_errors = _compute_errors(model, train_df, test_df, hparams, device)
     threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
 
     n_anomalies = int((test_errors > threshold).sum())
     print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
 
-    if use_lstm:
-        scores_df = score_test_set_sequence(model, test_df, seq_len=_seq_len, threshold=threshold, device=device)
-    else:
-        scores_df = score_test_set(model, test_df, threshold=threshold, device=device)
+    scores_df = _score_df(model, test_df, threshold, hparams, device)
 
     logger.report_scalar("metrics", "threshold", threshold, 0)
     logger.report_scalar("metrics", "train_mse_mean", float(train_errors.mean()), 0)
@@ -520,10 +519,7 @@ def main(
 
     print("Scoring full dataset for cross-period analysis...")
     full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-    if use_lstm:
-        full_scores = score_test_set_sequence(model, full_df, seq_len=_seq_len, threshold=threshold, device=device)
-    else:
-        full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
+    full_scores = _score_df(model, full_df, threshold, hparams, device)
     _publish_artifact(
         task,
         "full_scores",

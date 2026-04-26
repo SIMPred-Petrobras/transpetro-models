@@ -21,32 +21,20 @@ class EquipmentConfig:
 
 B4064A_NOVOS_PREPROCESS_PRESETS: dict[str, list[dict]] = {
     "baseline": [
-        {"step": "ffill", "limit": 6},
-        {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
-        {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
     ],
     "moving_average": [
-        {"step": "ffill", "limit": 6},
-        {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
-        {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
     ],
     "knn": [
-        {"step": "ffill", "limit": 6},
-        {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
-        {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
     ],
     "moving_average_knn": [
-        {"step": "ffill", "limit": 6},
-        {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
-        {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
@@ -92,6 +80,9 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         pre_split_steps=[
             {"step": "remove_sensor_errors", "error_values": [-25.0]},
             {"step": "resample", "freq": "1h"},
+            {"step": "ffill", "limit": 6},
+            {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
+            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
         ],
         preprocessing_steps=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS["baseline"]),
         preprocess_presets=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS),

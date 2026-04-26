@@ -5,6 +5,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from typing import Optional
 
 
+def make_windows(data: np.ndarray, seq_len: int) -> np.ndarray:
+    return np.stack([data[i : i + seq_len] for i in range(len(data) - seq_len + 1)])
+
+
 def make_dataloader(
     df,
     batch_size: int,
@@ -23,8 +27,7 @@ def make_sequence_dataloader(
     shuffle: bool = True,
     device: str = "cpu",
 ) -> DataLoader:
-    data = df.values.astype("float32")
-    windows = np.stack([data[i : i + seq_len] for i in range(len(data) - seq_len + 1)])
+    windows = make_windows(df.values.astype("float32"), seq_len)
     tensor = torch.tensor(windows, dtype=torch.float32).to(device)
     dataset = TensorDataset(tensor)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
