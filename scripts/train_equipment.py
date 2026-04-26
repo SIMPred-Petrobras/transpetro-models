@@ -149,6 +149,7 @@ def main(
     local_artifacts_dir: str = "artifacts_local",
     model_type: str = "dense",
     seq_len: int = 24,
+    threshold_percentile: float = 95.0,
 ) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
     base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
@@ -176,7 +177,7 @@ def main(
         "epochs": 100,
         "patience": 10,
         "exclusion_days": config.exclusion_days_before,
-        "threshold_percentile": 95.0,
+        "threshold_percentile": threshold_percentile,
         "weight_decay": 1e-5,
         "pre_split_steps": config.pre_split_steps,
         "preprocessing_steps": base_steps,
@@ -569,6 +570,12 @@ if __name__ == "__main__":
         default=24,
         help="Tamanho da janela temporal para o LSTM Autoencoder (default: 24h)",
     )
+    parser.add_argument(
+        "--threshold-percentile",
+        type=float,
+        default=95.0,
+        help="Percentil dos erros de treino usado como threshold de anomalia (default: 95.0)",
+    )
     args = parser.parse_args()
     main(
         args.equipment,
@@ -581,4 +588,5 @@ if __name__ == "__main__":
         local_artifacts_dir=args.local_artifacts_dir,
         model_type=args.model,
         seq_len=args.seq_len,
+        threshold_percentile=args.threshold_percentile,
     )
