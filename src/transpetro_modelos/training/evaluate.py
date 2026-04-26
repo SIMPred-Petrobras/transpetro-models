@@ -7,6 +7,26 @@ from torch.utils.data import DataLoader, TensorDataset
 from transpetro_modelos.training.train import make_windows
 
 
+def fit_ocsvm(train_df: pd.DataFrame, nu: float = 0.05, gamma: str = "scale"):
+    from sklearn.svm import OneClassSVM
+
+    clf = OneClassSVM(kernel="rbf", nu=nu, gamma=gamma)
+    clf.fit(train_df.values.astype("float32"))
+    return clf
+
+
+def compute_ocsvm_errors(clf, df: pd.DataFrame) -> np.ndarray:
+    return (-clf.decision_function(df.values.astype("float32"))).astype("float32")
+
+
+def score_ocsvm_set(clf, df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    errors = compute_ocsvm_errors(clf, df)
+    return pd.DataFrame(
+        {"reconstruction_error": errors, "is_anomaly": errors > threshold},
+        index=df.index,
+    )
+
+
 def compute_reconstruction_errors_sequence(
     model: torch.nn.Module,
     df: pd.DataFrame,

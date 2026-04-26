@@ -18,9 +18,12 @@ from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
 from transpetro_modelos.training.train import train_autoencoder, make_dataloader, make_sequence_dataloader
 from transpetro_modelos.training.evaluate import (
+    compute_ocsvm_errors,
     compute_reconstruction_errors,
     compute_reconstruction_errors_sequence,
     determine_threshold,
+    fit_ocsvm,
+    score_ocsvm_set,
     score_test_set,
     score_test_set_sequence,
 )
@@ -150,6 +153,7 @@ def main(
     model_type: str = "dense",
     seq_len: int = 24,
     threshold_percentile: float = 95.0,
+    ocsvm_nu: float = 0.05,
 ) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
     base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
@@ -189,6 +193,7 @@ def main(
         "local_artifacts_dir": local_artifacts_dir,
         "model_type": model_type,
         "seq_len": seq_len,
+        "ocsvm_nu": ocsvm_nu,
     }
     task.connect(hparams)
 
@@ -262,39 +267,44 @@ def main(
 
             n_features = train_df.shape[1]
             encoding_layers = hparams["encoding_layers"]
-            model, train_loader, val_loader = _build_model_and_loaders(
-                n_features, encoding_layers, train_df, val_df, hparams, device
-            )
 
             print("  Training...")
-            model = train_autoencoder(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                epochs=hparams["epochs"],
-                learning_rate=hparams["learning_rate"],
-                weight_decay=hparams["weight_decay"],
-                patience=hparams["patience"],
-                logger=None,
-            )
+            if hparams["model_type"] == "ocsvm":
+                model = fit_ocsvm(train_df, nu=hparams["ocsvm_nu"])
+                train_errors = compute_ocsvm_errors(model, train_df)
+                test_errors = compute_ocsvm_errors(model, test_df)
+                threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
+                full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+                test_scores = score_ocsvm_set(model, test_df, threshold)
+                full_scores = score_ocsvm_set(model, full_df, threshold)
+            else:
+                model, train_loader, val_loader = _build_model_and_loaders(
+                    n_features, encoding_layers, train_df, val_df, hparams, device
+                )
+                model = train_autoencoder(
+                    model=model,
+                    train_loader=train_loader,
+                    val_loader=val_loader,
+                    epochs=hparams["epochs"],
+                    learning_rate=hparams["learning_rate"],
+                    weight_decay=hparams["weight_decay"],
+                    patience=hparams["patience"],
+                    logger=None,
+                )
+                train_errors, test_errors = _compute_errors(model, train_df, test_df, hparams, device)
+                threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
+                full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+                test_scores = _score_df(model, test_df, threshold, hparams, device)
+                full_scores = _score_df(model, full_df, threshold, hparams, device)
 
-            train_errors, test_errors = _compute_errors(model, train_df, test_df, hparams, device)
-            threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
             n_anomalies = int((test_errors > threshold).sum())
             print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
-
-            full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-            test_scores = _score_df(model, test_df, threshold, hparams, device)
-            full_scores = _score_df(model, full_df, threshold, hparams, device)
 
             # Per-sensor scalar tracking
             logger.report_scalar("metrics_per_sensor", f"{sensor}/threshold", threshold, 0)
             logger.report_scalar("metrics_per_sensor", f"{sensor}/train_mse_mean", float(train_errors.mean()), 0)
             logger.report_scalar("metrics_per_sensor", f"{sensor}/test_mse_mean", float(test_errors.mean()), 0)
             logger.report_scalar("metrics_per_sensor", f"{sensor}/n_anomalies", n_anomalies, 0)
-
-            model_path = f"model_{equipment_id}__{slug}.pt"
-            torch.save(model.state_dict(), model_path)
 
             results = {
                 "sensor": sensor,
@@ -317,13 +327,24 @@ def main(
                 "preprocessing_artifacts": _artifacts_presence(artifacts),
             }
 
-            _publish_artifact(
-                task,
-                f"model_file__{slug}",
-                model_path,
-                local_dir=local_task_dir / "per_sensor",
-                upload_to_clearml=upload_to_clearml,
-            )
+            if hparams["model_type"] == "ocsvm":
+                _publish_artifact(
+                    task,
+                    f"model_file__{slug}",
+                    model,
+                    local_dir=local_task_dir / "per_sensor",
+                    upload_to_clearml=upload_to_clearml,
+                )
+            else:
+                model_path = f"model_{equipment_id}__{slug}.pt"
+                torch.save(model.state_dict(), model_path)
+                _publish_artifact(
+                    task,
+                    f"model_file__{slug}",
+                    model_path,
+                    local_dir=local_task_dir / "per_sensor",
+                    upload_to_clearml=upload_to_clearml,
+                )
             _publish_artifact(
                 task,
                 f"scaler__{slug}",
@@ -418,29 +439,34 @@ def main(
 
     n_features = train_df.shape[1]
     encoding_layers = hparams["encoding_layers"]
-    model, train_loader, val_loader = _build_model_and_loaders(
-        n_features, encoding_layers, train_df, val_df, hparams, device
-    )
 
     print("Training...")
-    model = train_autoencoder(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        epochs=hparams["epochs"],
-        learning_rate=hparams["learning_rate"],
-        weight_decay=hparams["weight_decay"],
-        patience=hparams["patience"],
-        logger=logger,
-    )
-
-    train_errors, test_errors = _compute_errors(model, train_df, test_df, hparams, device)
-    threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
+    if hparams["model_type"] == "ocsvm":
+        model = fit_ocsvm(train_df, nu=hparams["ocsvm_nu"])
+        train_errors = compute_ocsvm_errors(model, train_df)
+        test_errors = compute_ocsvm_errors(model, test_df)
+        threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
+        scores_df = score_ocsvm_set(model, test_df, threshold)
+    else:
+        model, train_loader, val_loader = _build_model_and_loaders(
+            n_features, encoding_layers, train_df, val_df, hparams, device
+        )
+        model = train_autoencoder(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=hparams["epochs"],
+            learning_rate=hparams["learning_rate"],
+            weight_decay=hparams["weight_decay"],
+            patience=hparams["patience"],
+            logger=logger,
+        )
+        train_errors, test_errors = _compute_errors(model, train_df, test_df, hparams, device)
+        threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
+        scores_df = _score_df(model, test_df, threshold, hparams, device)
 
     n_anomalies = int((test_errors > threshold).sum())
     print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
-
-    scores_df = _score_df(model, test_df, threshold, hparams, device)
 
     logger.report_scalar("metrics", "threshold", threshold, 0)
     logger.report_scalar("metrics", "train_mse_mean", float(train_errors.mean()), 0)
@@ -450,15 +476,24 @@ def main(
     logger.report_scalar("rows", "val_after_preprocessing", val_report.rows_after, 0)
     logger.report_scalar("rows", "test_after_preprocessing", test_report.rows_after, 0)
 
-    model_path = f"model_{equipment_id}.pt"
-    torch.save(model.state_dict(), model_path)
-    _publish_artifact(
-        task,
-        "model_file",
-        model_path,
-        local_dir=local_task_dir,
-        upload_to_clearml=upload_to_clearml,
-    )
+    if hparams["model_type"] == "ocsvm":
+        _publish_artifact(
+            task,
+            "model_file",
+            model,
+            local_dir=local_task_dir,
+            upload_to_clearml=upload_to_clearml,
+        )
+    else:
+        model_path = f"model_{equipment_id}.pt"
+        torch.save(model.state_dict(), model_path)
+        _publish_artifact(
+            task,
+            "model_file",
+            model_path,
+            local_dir=local_task_dir,
+            upload_to_clearml=upload_to_clearml,
+        )
     _publish_artifact(
         task,
         "scaler",
@@ -520,7 +555,10 @@ def main(
 
     print("Scoring full dataset for cross-period analysis...")
     full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-    full_scores = _score_df(model, full_df, threshold, hparams, device)
+    if hparams["model_type"] == "ocsvm":
+        full_scores = score_ocsvm_set(model, full_df, threshold)
+    else:
+        full_scores = _score_df(model, full_df, threshold, hparams, device)
     _publish_artifact(
         task,
         "full_scores",
@@ -561,8 +599,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         default="dense",
-        choices=["dense", "lstm"],
-        help="Arquitetura do autoencoder: dense (padrao) ou lstm",
+        choices=["dense", "lstm", "ocsvm"],
+        help="Modelo: dense (padrao), lstm ou ocsvm",
+    )
+    parser.add_argument(
+        "--ocsvm-nu",
+        type=float,
+        default=0.05,
+        help="Parametro nu do One-Class SVM: fracao maxima de outliers no treino (default: 0.05)",
     )
     parser.add_argument(
         "--seq-len",
@@ -589,4 +633,5 @@ if __name__ == "__main__":
         model_type=args.model,
         seq_len=args.seq_len,
         threshold_percentile=args.threshold_percentile,
+        ocsvm_nu=args.ocsvm_nu,
     )
