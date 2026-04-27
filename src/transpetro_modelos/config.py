@@ -44,27 +44,20 @@ B4064A_NOVOS_PREPROCESS_PRESETS: dict[str, list[dict]] = {
 
 
 EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
-    "B-402E": EquipmentConfig(
-        equipment_id="B-402E",
-        failure_date=datetime(2019, 10, 30, 11, 6),
-        failure_description="Quebra de barra do rotor do motor com colisão no enrolamento estatórico",
-        dataset_name="transpetro-b-402e",
-        datetime_column="Data Hora",
-        exclusion_days_before=10,
-        preprocessing_steps=[
-            {"step": "filter_running", "column": "Corrente", "threshold": 1.0},
-            {"step": "remove_transients", "minutes": 10},
-            {"step": "normalize", "method": "standard"},
-        ],
-    ),
-    "B-4064A": EquipmentConfig(
+    "B-4064A_interpolated": EquipmentConfig(
         equipment_id="B-4064A",
         failure_date=datetime(2024, 8, 30, 7, 58),
         failure_description="Roçamento interno do rotor com a carcaça da bomba",
-        dataset_name="transpetro-b-4064a",
+        dataset_name="transpetro-b-4064a_interpolated",
         datetime_column=None,
         exclusion_days_before=10,
+        val_start_date=datetime(2024, 8, 11),
+        pre_split_steps=[
+            {"step": "filter_running", "column": "Corrente", "threshold": 30},
+            {"step": "remove_transients", "minutes": 10},
+        ],
         preprocessing_steps=[
+            {"step": "clip"},
             {"step": "normalize", "method": "standard"},
         ],
     ),

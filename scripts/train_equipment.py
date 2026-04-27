@@ -4,6 +4,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+import numpy as np
 
 import pandas as pd
 import torch
@@ -171,6 +172,7 @@ def main(
         project_name="Transpetro",
         task_name=task_name,
         output_uri=True,
+        reuse_last_task_id=False
     )
     task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
 
@@ -228,7 +230,6 @@ def main(
         exclusion_days=hparams["exclusion_days"],
         val_start_date=val_start,
     )
-    print(f"  Train: {splits['train'].shape}, Val: {splits['val'].shape}, Test: {splits['test'].shape}")
 
     logger = task.get_logger()
     base_steps = hparams["preprocessing_steps"]
