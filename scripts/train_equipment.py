@@ -154,6 +154,7 @@ def main(
     seq_len: int = 24,
     threshold_percentile: float = 95.0,
     ocsvm_nu: float = 0.05,
+    val_start_date_override: str | None = None,
 ) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
     base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
@@ -187,7 +188,7 @@ def main(
         "preprocessing_steps": base_steps,
         "preprocess_preset": preprocess_preset,
         "queue": queue,
-        "val_start_date": config.val_start_date.isoformat() if config.val_start_date else None,
+        "val_start_date": val_start_date_override or (config.val_start_date.isoformat() if config.val_start_date else None),
         "per_sensor_mode": per_sensor,
         "upload_to_clearml": upload_to_clearml,
         "local_artifacts_dir": local_artifacts_dir,
@@ -620,6 +621,11 @@ if __name__ == "__main__":
         default=95.0,
         help="Percentil dos erros de treino usado como threshold de anomalia (default: 95.0)",
     )
+    parser.add_argument(
+        "--val-start-date",
+        default=None,
+        help="Sobrescreve o val_start_date do config (formato: YYYY-MM-DD). Ex: 2024-05-01",
+    )
     args = parser.parse_args()
     main(
         args.equipment,
@@ -634,4 +640,5 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
         threshold_percentile=args.threshold_percentile,
         ocsvm_nu=args.ocsvm_nu,
+        val_start_date_override=args.val_start_date,
     )
