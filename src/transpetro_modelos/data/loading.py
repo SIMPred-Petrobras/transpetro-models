@@ -27,7 +27,11 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
             dataset_project="Transpetro",
         )
         local_path = ds.get_local_copy()
-        file_path = Path(local_path) / f"{equipment_id}.feather"
+        base = Path(local_path) / equipment_id
+        if base.with_suffix(".feather").exists():
+            file_path = base.with_suffix(".feather")
+        else:
+            file_path = base.with_suffix(".csv")
     elif config.local_feather is not None:
         file_path = PROJECT_ROOT / config.local_feather
     else:
