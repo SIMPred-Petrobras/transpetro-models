@@ -35,11 +35,17 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
     elif config.local_feather is not None:
         file_path = PROJECT_ROOT / config.local_feather
     else:
-        file_path = LOCAL_DATA_DIR / f"{equipment_id}.csv"
+        base = LOCAL_DATA_DIR / equipment_id
+        if base.with_suffix(".feather").exists():
+            file_path = base.with_suffix(".feather")
+        else:
+            file_path = base.with_suffix(".csv")
 
     df = _read_file(file_path)
 
-    if config.datetime_column is not None:
+    if isinstance(df.index, pd.DatetimeIndex):
+        pass
+    elif config.datetime_column is not None:
         df = df.set_index(config.datetime_column)
         df.index = pd.to_datetime(df.index)
     else:
