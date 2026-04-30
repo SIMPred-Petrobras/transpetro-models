@@ -207,7 +207,9 @@ def main(
 
     # 1. Load data
     print(f"Loading data for {equipment_id}...")
+   
     df = load_equipment_data(equipment_id, from_clearml=not local_data)
+
     print(f"  Loaded: {df.shape}")
 
     # 2. Pre-split preprocessing (resample, filter_running) — runs on full dataset
