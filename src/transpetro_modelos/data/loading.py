@@ -20,7 +20,7 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
             dataset_name=config.dataset_name,
             dataset_project="Transpetro",
         )
-        print(ds)
+
         local_path = ds.get_local_copy()
         file_path = Path(local_path) / f"{equipment_id}.csv"
     elif config.local_feather is not None:
@@ -34,7 +34,6 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
         df = df.set_index(config.datetime_column)
         df.index = pd.to_datetime(df.index)
     else:
-        df = df.set_index("Timestamp")
         df.index = pd.to_datetime(df.index)
 
     df = df.sort_index()

@@ -21,5 +21,4 @@ if __name__ == "__main__":
     else:
         for equipment_id in EQUIPMENT_CONFIGS:
             upload_equipment_dataset(equipment_id)
-        upload_metadata()
         print("\nAll datasets uploaded successfully.")
