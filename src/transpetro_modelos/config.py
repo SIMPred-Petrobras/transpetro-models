@@ -17,98 +17,51 @@ class EquipmentConfig:
     preprocess_presets: dict[str, list[dict]] = field(default_factory=dict)
     local_feather: Optional[str] = None  # override path for local loading (relative to project root)
     val_start_date: Optional[datetime] = None  # fixed validation start date (e.g., Jul 1)
+    val_end_date: Optional[datetime] = None
 
 
-B4064A_NOVOS_PREPROCESS_PRESETS: dict[str, list[dict]] = {
+PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
     "baseline": [
         {"step": "clip"},
-        {"step": "normalize", "method": "robust"},
+        {"step": "normalize", "method": "standard"},
     ],
-    "moving_average": [
-        {"step": "moving_average", "window": 3, "min_periods": 1},
-        {"step": "clip"},
-        {"step": "normalize", "method": "robust"},
-    ],
+
     "knn": [
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "clip"},
-        {"step": "normalize", "method": "robust"},
+        {"step": "normalize", "method": "standard"},
     ],
-    "moving_average_knn": [
-        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
+
+    "smooth": [
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
-        {"step": "normalize", "method": "robust"},
+        {"step": "normalize", "method": "standard"},
     ],
 }
 
 
 EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
-    "B-402E": EquipmentConfig(
-        equipment_id="B-402E",
-        failure_date=datetime(2019, 10, 30, 11, 6),
-        failure_description="Quebra de barra do rotor do motor com colisão no enrolamento estatórico",
-        dataset_name="transpetro-b-402e",
-        datetime_column="Data Hora",
-        exclusion_days_before=10,
-        preprocessing_steps=[
-            {"step": "filter_running", "column": "Corrente", "threshold": 1.0},
-            {"step": "remove_transients", "minutes": 10},
-            {"step": "normalize", "method": "standard"},
-        ],
-    ),
     "B-4064A": EquipmentConfig(
         equipment_id="B-4064A",
         failure_date=datetime(2024, 8, 30, 7, 58),
         failure_description="Roçamento interno do rotor com a carcaça da bomba",
         dataset_name="transpetro-b-4064a",
-        datetime_column=None,
-        exclusion_days_before=10,
-        preprocessing_steps=[
-            {"step": "normalize", "method": "standard"},
-        ],
-    ),
-    "B-4064A-novos": EquipmentConfig(
-        equipment_id="B-4064A-novos",
-        failure_date=datetime(2024, 8, 30, 7, 58),
-        failure_description="Roçamento interno do rotor com a carcaça da bomba",
-        dataset_name="transpetro-b-4064a-novos",
         datetime_column="Timestamp",
         exclusion_days_before=10,
-        local_feather="Dados-novos/B-4064A_novos.feather",
-        val_start_date=datetime(2024, 7, 1),
+        #local_feather="Dados/B-4064A.feather",
+        val_start_date=datetime(2024, 5, 1),
+        val_end_date=datetime(2024, 5, 31),
         pre_split_steps=[
             {"step": "remove_sensor_errors", "error_values": [-25.0]},
             {"step": "resample", "freq": "1h"},
-            {"step": "ffill", "limit": 6},
-            {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
-            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
+            {"step": "interpolate", "method": "time", "limit": 4},
+            {"step": "filter_running", "column": "B-4064A: Corrente", "threshold": 1.0},
+            {"step": "filter_running", "column": "B-4064A: Pressão Descarga", "threshold": 0.0},
+            {"step": "filter_running", "column": "B-4064A: Pressão Sucção", "threshold": 0.0},
         ],
-        preprocessing_steps=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS["baseline"]),
-        preprocess_presets=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS),
-    ),
-    "B-8802B": EquipmentConfig(
-        equipment_id="B-8802B",
-        failure_date=datetime(2022, 7, 6, 10, 0),
-        failure_description="Trinca nas lâminas do acoplamento",
-        dataset_name="transpetro-b-8802b",
-        datetime_column=None,
-        exclusion_days_before=10,
-        preprocessing_steps=[
-            {"step": "normalize", "method": "standard"},
-        ],
-    ),
-    "B-90001A": EquipmentConfig(
-        equipment_id="B-90001A",
-        failure_date=datetime(2021, 8, 28, 0, 0),
-        failure_description="Afrouxamento no aperto dos parafusos do mancal do lado acoplado da bomba",
-        dataset_name="transpetro-b-90001a",
-        datetime_column=None,
-        exclusion_days_before=10,
-        preprocessing_steps=[
-            {"step": "normalize", "method": "standard"},
-        ],
-    ),
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline"]),
+        preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
+    )
 }
 
 

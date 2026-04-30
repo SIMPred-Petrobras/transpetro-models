@@ -188,6 +188,7 @@ def main(
         "preprocess_preset": preprocess_preset,
         "queue": queue,
         "val_start_date": config.val_start_date.isoformat() if config.val_start_date else None,
+        "val_end_date": (config.val_end_date.isoformat() if config.val_end_date else None),
         "per_sensor_mode": per_sensor,
         "upload_to_clearml": upload_to_clearml,
         "local_artifacts_dir": local_artifacts_dir,
@@ -206,7 +207,7 @@ def main(
 
     # 1. Load data
     print(f"Loading data for {equipment_id}...")
-    df = load_equipment_data(equipment_id, from_clearml=not local_data)
+    df = load_equipment_data(equipment_id, from_clearml=False)
     print(f"  Loaded: {df.shape}")
 
     # 2. Pre-split preprocessing (resample, filter_running) — runs on full dataset
@@ -217,16 +218,22 @@ def main(
 
     # 3. Split
     val_start = None
+    val_end = None
     if hparams["val_start_date"]:
         from datetime import datetime as dt
         val_start = dt.fromisoformat(hparams["val_start_date"])
 
+    if hparams["val_end_date"]:
+        val_end = dt.fromisoformat(
+            hparams["val_end_date"]
+        )
+
     splits = temporal_split(
         df,
-        failure_date=config.failure_date,
-        exclusion_days=hparams["exclusion_days"],
         val_start_date=val_start,
+        val_end_date=val_end,
     )
+
     print(f"  Train: {splits['train'].shape}, Val: {splits['val'].shape}, Test: {splits['test'].shape}")
 
     logger = task.get_logger()

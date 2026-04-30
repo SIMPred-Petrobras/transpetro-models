@@ -107,6 +107,9 @@ def select_features(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     """Select a subset of columns."""
     return df[features].copy()
 
+def interpolate_df(df: pd.DataFrame, method="time", limit=3) -> pd.DataFrame:
+    df = df.interpolate(method=method, limit=limit)
+    return df
 
 def remove_sensor_errors(df: pd.DataFrame, error_values: list[float] | None = None) -> pd.DataFrame:
     """Replace known sensor error codes with NaN (e.g., -25.0 in temperature sensors)."""
@@ -224,6 +227,8 @@ def run_preprocessing(
             df = resample(df, **params)
         elif step == "ffill":
             df = ffill(df, **params)
+        elif step == "interpolate":
+            df = interpolate_df(df, **params)
         elif step == "moving_average":
             df = moving_average(df, **params)
         elif step == "knn_impute":
