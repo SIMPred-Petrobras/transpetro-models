@@ -27,14 +27,14 @@ COMMUM_PREPROCESSING_STEPS: list[dict] = [
 
 PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
     "baseline": [
-        {"step": "interpolate", "method": "time", "limit": None},
+        {"step": "interpolate", "method": "time"},
         *COMMUM_PREPROCESSING_STEPS,
         {"step": "clip"},
         {"step": "normalize", "method": "standard"},
     ],
 
     "knn": [
-        {"step": "interpolate", "method": "time", "limit": None},
+        {"step": "interpolate", "method": "time"},
         *COMMUM_PREPROCESSING_STEPS,
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "clip"},
@@ -42,7 +42,7 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
     ],
 
     "moving_average": [
-        {"step": "interpolate", "method": "time", "limit": None},
+        {"step": "interpolate", "method": "time"},
         *COMMUM_PREPROCESSING_STEPS,
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
