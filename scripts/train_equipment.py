@@ -242,6 +242,8 @@ def main(
     base_steps = hparams["preprocessing_steps"]
     local_task_dir = Path(local_artifacts_dir) / f"{task.id}_{equipment_id}"
 
+    
+
     if per_sensor:
         sensors = list(df.columns)
         print(f"Per-sensor mode enabled. Training {len(sensors)} models (one per sensor).")
