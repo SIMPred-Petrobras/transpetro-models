@@ -108,7 +108,7 @@ def select_features(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     return df[features].copy()
 
 def interpolate_df(df: pd.DataFrame, method="time", limit=3) -> pd.DataFrame:
-    df = df.interpolate(method=method).bfill().ffill().dropna()
+    df = df.interpolate(method=method, limit=limit).bfill().ffill().dropna()
     return df
 
 def remove_sensor_errors(df: pd.DataFrame, error_values: list[float] | None = None) -> pd.DataFrame:
