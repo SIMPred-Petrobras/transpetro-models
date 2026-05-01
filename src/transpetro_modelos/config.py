@@ -19,19 +19,31 @@ class EquipmentConfig:
     val_end_date: Optional[datetime] = None
 
 
+COMMUM_PREPROCESSING_STEPS: list[dict] = [
+    {"step": "filter_running", "column": "B-4064A: Corrente", "threshold": 1.0},
+    {"step": "filter_running", "column": "B-4064A: Pressão Descarga", "threshold": 0.0},
+    {"step": "filter_running", "column": "B-4064A: Pressão Sucção", "threshold": 0.0},
+]
+
 PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
     "baseline": [
+        {"step": "interpolate", "method": "time"},
+        *COMMUM_PREPROCESSING_STEPS,
         {"step": "clip"},
         {"step": "normalize", "method": "standard"},
     ],
 
     "knn": [
+        {"step": "interpolate", "method": "time"},
+        *COMMUM_PREPROCESSING_STEPS,
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "clip"},
         {"step": "normalize", "method": "standard"},
     ],
 
     "moving_average": [
+        {"step": "interpolate", "method": "time"},
+        *COMMUM_PREPROCESSING_STEPS,
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
         {"step": "normalize", "method": "standard"},
@@ -53,10 +65,6 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         pre_split_steps=[
             {"step": "remove_sensor_errors", "error_values": [-25.0]},
             {"step": "resample", "freq": "1h"},
-            {"step": "interpolate", "method": "time", "limit": 4},
-            {"step": "filter_running", "column": "B-4064A: Corrente", "threshold": 1.0},
-            {"step": "filter_running", "column": "B-4064A: Pressão Descarga", "threshold": 0.0},
-            {"step": "filter_running", "column": "B-4064A: Pressão Sucção", "threshold": 0.0},
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline"]),
         preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
@@ -74,6 +82,24 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         val_end_date=datetime(2024, 8, 20),
         pre_split_steps=[
             {"step": "filter_running", "column": "Corrente", "threshold": 30},
+            {"step": "remove_transients", "minutes": 10},
+        ],
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline"]),
+        preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
+    ),
+
+    "B-3403C_interpolated": EquipmentConfig(
+        equipment_id="B-3403C_interpolated",
+        failure_date=datetime(2023, 9, 12),
+        failure_description="Quebra da ponta do eixo LNA da bomba",
+        dataset_name="transpetro-b-3403c_interpolated",
+        datetime_column="Timestamp",
+        exclusion_days_before=10,
+        local_feather="Dados/B-3403C_interpolated.csv",
+        val_start_date=datetime(2023, 8, 24),
+        val_end_date=datetime(2023, 9, 2),
+        pre_split_steps=[
+            {"step": "filter_running", "column": "Corrente", "threshold": 1},
             {"step": "remove_transients", "minutes": 10},
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline"]),
