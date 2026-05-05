@@ -27,6 +27,15 @@ def filter_running(df: pd.DataFrame, column: str, threshold: float) -> pd.DataFr
         return df
     return df[df[column] > threshold].copy()
 
+def filter_threshold(df: pd.DataFrame, columns: list[str], threshold: float) -> pd.DataFrame:
+    existing = [c for c in columns if c in df.columns]
+
+    if not existing:
+        return df
+
+    mask = df[existing].gt(threshold).all(axis=1)
+
+    return df[mask].copy()
 
 def remove_transients(df: pd.DataFrame, minutes: int = 10) -> pd.DataFrame:
     """
@@ -215,6 +224,8 @@ def run_preprocessing(
 
         if step == "filter_running":
             df = filter_running(df, **params)
+        elif step == "filter_threshold":
+            df = filter_threshold(df, **params)
         elif step == "remove_transients":
             df = remove_transients(df, **params)
         elif step == "normalize":

@@ -26,14 +26,19 @@ COMMUM_PREPROCESSING_STEPS: list[dict] = [
 ]
 
 PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
-    "baseline": [
+    "baseline_raw": [
         {"step": "interpolate", "method": "time", "limit": 4},
         *COMMUM_PREPROCESSING_STEPS,
         {"step": "clip"},
         {"step": "normalize", "method": "standard"},
     ],
 
-    "knn": [
+    "baseline_interpolated": [
+        {"step": "clip"},
+        {"step": "normalize", "method": "standard"},
+    ],
+
+    "knn_raw": [
         {"step": "interpolate", "method": "time", "limit": 4},
         *COMMUM_PREPROCESSING_STEPS,
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
@@ -41,9 +46,21 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
         {"step": "normalize", "method": "standard"},
     ],
 
-    "moving_average": [
+    "knn_interpolated": [
+        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
+        {"step": "clip"},
+        {"step": "normalize", "method": "standard"},
+    ],
+
+    "moving_average_raw": [
         {"step": "interpolate", "method": "time", "limit": 4},
         *COMMUM_PREPROCESSING_STEPS,
+        {"step": "moving_average", "window": 3, "min_periods": 1},
+        {"step": "clip"},
+        {"step": "normalize", "method": "standard"},
+    ],
+
+    "moving_average_interpolated": [
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
         {"step": "normalize", "method": "standard"},
@@ -66,7 +83,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "remove_sensor_errors", "error_values": [-25.0]},
             {"step": "resample", "freq": "1h"}
         ],
-        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline"]),
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_raw"]),
         preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
     ),
 
@@ -84,7 +101,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "filter_running", "column": "Corrente", "threshold": 30},
             {"step": "remove_transients", "minutes": 10},
         ],
-        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline"]),
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
         preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
     ),
 
@@ -102,7 +119,25 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "filter_running", "column": "Corrente", "threshold": 1},
             {"step": "remove_transients", "minutes": 10},
         ],
-        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline"]),
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
+        preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
+    ),
+
+    "B-90001A_interpolated": EquipmentConfig(
+        equipment_id="B-90001A_interpolated",
+        failure_date=datetime(2021, 8, 28),
+        failure_description="Afrouxamento no aperto dos parafusos do mancal do lado acoplado da bomba",
+        dataset_name="transpetro-b-90001a_interpolated",
+        datetime_column="Timestamp",
+        exclusion_days_before=10,
+        local_feather="Dados/B-90001A_interpolated.csv",
+        val_start_date=datetime(2021, 8, 9),
+        val_end_date=datetime(2021, 8, 18),
+        pre_split_steps=[
+            {"step": "filter_threshold", "columns": ['Vibração Motor LNA Y', 'Vibração Motor LA X', 'Vibração Motor LA Y', 'Vibração Bomba LA X', 'Vibração Bomba LA Y', 'Vibração Bomba LNA X', 'Vibração Bomba LNA Y'], "threshold": 10},
+            {"step": "remove_transients", "minutes": 10},
+        ],
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
         preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
     )
 }

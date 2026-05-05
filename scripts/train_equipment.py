@@ -594,7 +594,7 @@ if __name__ == "__main__":
     parser.add_argument("--per-sensor", action="store_true", help="Train one model per sensor in a single task")
     parser.add_argument(
         "--preprocess-preset",
-        default="baseline",
+        default="baseline_raw",
         help="Preprocessing preset to use (baseline, moving_average, knn, moving_average_knn for B-4064A-novos)",
     )
     parser.add_argument(
