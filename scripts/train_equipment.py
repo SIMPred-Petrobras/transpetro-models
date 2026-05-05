@@ -156,6 +156,8 @@ def main(
     threshold_percentile: float = 95.0,
     ocsvm_nu: float = 0.05,
     val_start_date_override: str | None = None,
+    epochs: int = 200,
+    patience: int = 20,
 ) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
     base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
@@ -181,8 +183,8 @@ def main(
         "encoding_layers": None,  # None = auto based on n_features
         "learning_rate": 1e-3,
         "batch_size": 256,
-        "epochs": 100,
-        "patience": 10,
+        "epochs": epochs,
+        "patience": patience,
         "exclusion_days": config.exclusion_days_before,
         "threshold_percentile": threshold_percentile,
         "weight_decay": 1e-5,
@@ -627,6 +629,18 @@ if __name__ == "__main__":
         default=None,
         help="Sobrescreve o val_start_date do config (formato: YYYY-MM-DD). Ex: 2024-05-01",
     )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=200,
+        help="Numero de epochs de treino (default: 200)",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=20,
+        help="Patience para early stopping (default: 20)",
+    )
     args = parser.parse_args()
     main(
         args.equipment,
@@ -642,4 +656,6 @@ if __name__ == "__main__":
         threshold_percentile=args.threshold_percentile,
         ocsvm_nu=args.ocsvm_nu,
         val_start_date_override=args.val_start_date,
+        epochs=args.epochs,
+        patience=args.patience,
     )

@@ -16,6 +16,7 @@ class EquipmentConfig:
     pre_split_steps: list[dict] = field(default_factory=list)  # resample, filter_running (roda antes do split)
     preprocess_presets: dict[str, list[dict]] = field(default_factory=dict)
     local_feather: Optional[str] = None  # override path for local loading (relative to project root)
+    dataset_file_stem: Optional[str] = None  # override filename stem when fetching from ClearML (default: equipment_id)
     val_start_date: Optional[datetime] = None  # fixed validation start date (e.g., Jul 1)
 
 
@@ -87,8 +88,92 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         dataset_name="transpetro-b-8802b",
         datetime_column=None,
         exclusion_days_before=10,
+        pre_split_steps=[
+            {"step": "remove_sensor_errors", "error_values": [0.0]},
+            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 35.0},
+            {"step": "remove_transients", "minutes": 15},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+            {"step": "select_features", "features": ["Pressão Sucção", "Pressão Descarga", "Vibração Bomba LA", "Vibração Bomba LNA", "Temperatura Bomba LA"]},
+        ],
         preprocessing_steps=[
-            {"step": "normalize", "method": "standard"},
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
+        ],
+    ),
+    "B-8802B-8s": EquipmentConfig(
+        equipment_id="B-8802B-8s",
+        failure_date=datetime(2022, 7, 6, 10, 0),
+        failure_description="Trinca nas lâminas do acoplamento",
+        dataset_name="transpetro-b-8802b",
+        datetime_column=None,
+        exclusion_days_before=10,
+        dataset_file_stem="B-8802B",
+        pre_split_steps=[
+            {"step": "remove_sensor_errors", "error_values": [0.0]},
+            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 35.0},
+            {"step": "remove_transients", "minutes": 15},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+        ],
+        preprocessing_steps=[
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
+        ],
+    ),
+    "B-8802B-8s-nfr": EquipmentConfig(
+        equipment_id="B-8802B-8s-nfr",
+        failure_date=datetime(2022, 7, 6, 10, 0),
+        failure_description="Trinca nas lâminas do acoplamento",
+        dataset_name="transpetro-b-8802b",
+        datetime_column=None,
+        exclusion_days_before=10,
+        dataset_file_stem="B-8802B",
+        pre_split_steps=[
+            {"step": "remove_sensor_errors", "error_values": [0.0]},
+            {"step": "remove_transients", "minutes": 15},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+        ],
+        preprocessing_steps=[
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
+        ],
+    ),
+    "B-6511502A": EquipmentConfig(
+        equipment_id="B-6511502A",
+        failure_date=datetime(2023, 5, 15, 0, 0),
+        failure_description="Quebra das lâminas do acoplamento",
+        dataset_name="transpetro-b-6511502a",
+        datetime_column=None,
+        exclusion_days_before=10,
+        local_feather="DadosV2/B-6511502A_pivoted.feather",
+        pre_split_steps=[
+            {"step": "remove_sensor_errors", "error_values": [32767.0]},
+            {"step": "filter_running", "column": "CORRENTE ELÉTRICA DO MOTOR", "threshold": 60.0},
+            {"step": "remove_transients", "minutes": 15},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+            {"step": "select_features", "features": [
+                "CORRENTE ELÉTRICA DO MOTOR",
+                "PRESSÃO SUCÇÃO",
+                "PRESSÃO DESCARGA",
+                "DESLOC. AXIAL EIXO BB LNA 1 ZE-50",
+                "DESLOC. AXIAL EIXO BB LNA 2 ZE-51",
+                "TEMP. MANCAL LNA MOT TE-07A1/A2",
+                "VIB. MANCAL RADIAL BB LA 0° VE-50C",
+                "VIB. MANCAL RADIAL BB LA 90° VE-51C",
+                "VIB. MANCAL RADIAL BB LNA 0° VE-50D",
+                "VIB. MANCAL RADIAL BB LNA 90° VE-51D",
+                "VIB. MANCAL RADIAL MOT LA 0° VE-51B",
+                "VIB. MANCAL RADIAL MOT LA 90° VE-50B",
+                "VIB. MANCAL RADIAL MOT LNA 0° VE-50A",
+                "VIB. MANCAL RADIAL MOT LNA 90° VE-51A",
+            ]},
+        ],
+        preprocessing_steps=[
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
         ],
     ),
     "B-90001A": EquipmentConfig(

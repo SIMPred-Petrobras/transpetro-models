@@ -44,11 +44,14 @@ def train_autoencoder(
     logger=None,  # clearml Logger
 ) -> torch.nn.Module:
     """
-    Train the autoencoder with early stopping.
+    Train the autoencoder with early stopping and ReduceLROnPlateau scheduler.
     Logs train_loss and val_loss per epoch via ClearML logger if provided.
     Returns the model with best validation loss.
     """
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=max(5, patience // 4), min_lr=1e-6
+    )
 
     best_val_loss = float("inf")
     best_state = None
@@ -77,10 +80,12 @@ def train_autoencoder(
 
         avg_train = float(np.mean(train_losses))
         avg_val = float(np.mean(val_losses))
+        scheduler.step(avg_val)
 
         if logger is not None:
             logger.report_scalar("loss", "train", avg_train, epoch)
             logger.report_scalar("loss", "validation", avg_val, epoch)
+            logger.report_scalar("loss", "lr", optimizer.param_groups[0]["lr"], epoch)
 
         # Early stopping
         if avg_val < best_val_loss:
@@ -94,7 +99,8 @@ def train_autoencoder(
                 break
 
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch + 1}/{epochs} — train: {avg_train:.6f}, val: {avg_val:.6f}")
+            lr = optimizer.param_groups[0]["lr"]
+            print(f"Epoch {epoch + 1}/{epochs} — train: {avg_train:.6f}, val: {avg_val:.6f}, lr: {lr:.2e}")
 
     if best_state is not None:
         model.load_state_dict(best_state)
