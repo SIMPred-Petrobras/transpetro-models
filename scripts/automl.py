@@ -93,7 +93,7 @@ def _save_best_artifacts(
 
 
 def _init_clearml(args: argparse.Namespace, n_trials: int):
-    if not args.clearml:
+    if not (args.clearml or args.remote):
         return None
     if Task is None:
         raise RuntimeError("ClearML não está disponível neste ambiente.")
@@ -104,13 +104,20 @@ def _init_clearml(args: argparse.Namespace, n_trials: int):
         output_uri=True,
         reuse_last_task_id=False,
     )
+    task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
     task.connect({
         "equipment_id": args.equipment,
         "n_trials": n_trials,
         "prefailure_days": args.prefailure_days,
         "normal_end_days": args.normal_end_days,
         "quick": args.quick,
+        "models": args.models,
+        "presets": args.presets,
+        "epochs": args.epochs,
+        "patience": args.patience,
     })
+    if args.remote:
+        task.execute_remotely(queue_name=args.queue)
     return task
 
 
@@ -322,8 +329,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lstm-layers", nargs="+", default=None)
     parser.add_argument("--ocsvm-nus", nargs="+", default=None)
     parser.add_argument("--ocsvm-gammas", nargs="+", default=None)
+    parser.add_argument("--remote", action="store_true",
+                        help="Envia para execução remota no ClearML (implica --clearml)")
+    parser.add_argument("--queue", default="default",
+                        help="Fila ClearML para execução remota (default: default)")
     parser.add_argument("--clearml", action="store_true",
-                        help="Registra métricas e artefatos no ClearML")
+                        help="Registra métricas e artefatos no ClearML sem rodar remotamente")
     parser.add_argument("--clearml-project", default="Transpetro")
     parser.add_argument("--clearml-task-name", default=None,
                         help="Nome da task ClearML (default: automl-anomaly-<equipment>)")
