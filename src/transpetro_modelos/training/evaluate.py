@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import torch
@@ -93,6 +95,50 @@ def compute_reconstruction_errors(
 def determine_threshold(train_errors: np.ndarray, percentile: float = 95.0) -> float:
     """Threshold = percentile of training reconstruction errors."""
     return float(np.percentile(train_errors, percentile))
+
+
+def failure_detection_metrics(
+    scores: pd.DataFrame,
+    failure_date: datetime,
+    prefailure_days: int = 30,
+    normal_end_days: int = 60,
+) -> dict[str, float | int]:
+    """
+    Métricas de detecção de falha a partir de um DataFrame de scores (coluna is_anomaly).
+
+    Define dois períodos:
+      - normal: tudo antes de (failure_date - normal_end_days)
+      - pré-falha: (failure_date - prefailure_days) até failure_date
+
+    Retorna:
+      composite_score         = prefailure_alert_rate * (1 - normal_alert_rate)  [0..1, primário]
+      discrimination_ratio    = prefailure_alert_rate / (normal_alert_rate + eps) [auxiliar]
+      prefailure_alert_rate   = fração de alarmes na janela pré-falha
+      normal_alert_rate       = fração de alarmes no período normal
+    """
+    _EPS = 1e-9
+    failure_ts = pd.Timestamp(failure_date)
+    normal_end = failure_ts - pd.Timedelta(days=normal_end_days)
+    prefailure_start = failure_ts - pd.Timedelta(days=prefailure_days)
+
+    normal_flags = scores.loc[scores.index < normal_end, "is_anomaly"]
+    prefailure_flags = scores.loc[
+        (scores.index >= prefailure_start) & (scores.index < failure_ts), "is_anomaly"
+    ]
+
+    normal_rate = float(normal_flags.mean()) if len(normal_flags) > 0 else 0.0
+    prefailure_rate = float(prefailure_flags.mean()) if len(prefailure_flags) > 0 else 0.0
+
+    return {
+        "composite_score": prefailure_rate * (1.0 - normal_rate),
+        "discrimination_ratio": prefailure_rate / (normal_rate + _EPS),
+        "prefailure_alert_rate": prefailure_rate,
+        "normal_alert_rate": normal_rate,
+        "n_prefailure_alerts": int(prefailure_flags.sum()),
+        "n_normal_alerts": int(normal_flags.sum()),
+        "n_prefailure_samples": len(prefailure_flags),
+        "n_normal_samples": len(normal_flags),
+    }
 
 
 def score_test_set(

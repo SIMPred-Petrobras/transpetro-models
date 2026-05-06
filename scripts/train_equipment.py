@@ -16,59 +16,12 @@ from transpetro_modelos.config import EQUIPMENT_CONFIGS, get_preprocessing_steps
 from transpetro_modelos.data.loading import load_equipment_data
 from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
-from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
-from transpetro_modelos.training.train import train_autoencoder, make_dataloader, make_sequence_dataloader
-from transpetro_modelos.training.evaluate import (
-    compute_ocsvm_errors,
-    compute_reconstruction_errors,
-    compute_reconstruction_errors_sequence,
-    determine_threshold,
-    fit_ocsvm,
-    score_ocsvm_set,
-    score_test_set,
-    score_test_set_sequence,
-)
+from transpetro_modelos.training.automl import train_model, score_full
 
 
 def _sensor_slug(sensor_name: str) -> str:
     return re.sub(r"[^0-9a-zA-Z]+", "_", sensor_name).strip("_").lower()
 
-
-def _build_model_and_loaders(n_features, encoding_layers, train_df, val_df, hparams, device):
-    use_lstm = hparams["model_type"] == "lstm"
-    seq_len = hparams["seq_len"]
-    batch_size = hparams["batch_size"]
-    if use_lstm:
-        model = LSTMAutoencoder(input_dim=n_features, seq_len=seq_len).to(device)
-        print(f"  Model LSTM input_dim={n_features}, seq_len={seq_len}")
-        train_loader = make_sequence_dataloader(train_df, seq_len=seq_len, batch_size=batch_size, shuffle=True, device=device)
-        val_loader = make_sequence_dataloader(val_df, seq_len=seq_len, batch_size=batch_size, shuffle=False, device=device)
-    else:
-        model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
-        print(f"  Model Dense input_dim={n_features}, encoding_layers={encoding_layers}")
-        train_loader = make_dataloader(train_df, batch_size=batch_size, shuffle=True, device=device)
-        val_loader = make_dataloader(val_df, batch_size=batch_size, shuffle=False, device=device)
-    return model, train_loader, val_loader
-
-
-def _compute_errors(model, train_df, test_df, hparams, device):
-    use_lstm = hparams["model_type"] == "lstm"
-    seq_len = hparams["seq_len"]
-    if use_lstm:
-        return (
-            compute_reconstruction_errors_sequence(model, train_df, seq_len=seq_len, device=device),
-            compute_reconstruction_errors_sequence(model, test_df, seq_len=seq_len, device=device),
-        )
-    return (
-        compute_reconstruction_errors(model, train_df, device=device),
-        compute_reconstruction_errors(model, test_df, device=device),
-    )
-
-
-def _score_df(model, df, threshold, hparams, device):
-    if hparams["model_type"] == "lstm":
-        return score_test_set_sequence(model, df, seq_len=hparams["seq_len"], threshold=threshold, device=device)
-    return score_test_set(model, df, threshold=threshold, device=device)
 
 
 def _build_sensor_steps(base_steps: list[dict], sensor: str) -> list[dict]:
@@ -273,35 +226,27 @@ def main(
             encoding_layers = hparams["encoding_layers"]
 
             print("  Training...")
-            if hparams["model_type"] == "ocsvm":
-                model = fit_ocsvm(train_df, nu=hparams["ocsvm_nu"])
-                train_errors = compute_ocsvm_errors(model, train_df)
-                test_errors = compute_ocsvm_errors(model, test_df)
-                threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
-                full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-                test_scores = score_ocsvm_set(model, test_df, threshold)
-                full_scores = score_ocsvm_set(model, full_df, threshold)
-            else:
-                model, train_loader, val_loader = _build_model_and_loaders(
-                    n_features, encoding_layers, train_df, val_df, hparams, device
-                )
-                model = train_autoencoder(
-                    model=model,
-                    train_loader=train_loader,
-                    val_loader=val_loader,
-                    epochs=hparams["epochs"],
-                    learning_rate=hparams["learning_rate"],
-                    weight_decay=hparams["weight_decay"],
-                    patience=hparams["patience"],
-                    logger=None,
-                )
-                train_errors, test_errors = _compute_errors(model, train_df, test_df, hparams, device)
-                threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
-                full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-                test_scores = _score_df(model, test_df, threshold, hparams, device)
-                full_scores = _score_df(model, full_df, threshold, hparams, device)
-
-            n_anomalies = int((test_errors > threshold).sum())
+            full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+            model = train_model(
+                hparams["model_type"], train_df, val_df, device,
+                dense_layers=hparams["encoding_layers"],
+                seq_len=hparams["seq_len"],
+                batch_size=hparams["batch_size"],
+                epochs=hparams["epochs"],
+                learning_rate=hparams["learning_rate"],
+                weight_decay=hparams["weight_decay"],
+                patience=hparams["patience"],
+                ocsvm_nu=hparams["ocsvm_nu"],
+            )
+            full_scores, threshold, train_errors = score_full(
+                model, hparams["model_type"], train_df, full_df,
+                hparams["threshold_percentile"], device,
+                seq_len=hparams["seq_len"],
+                batch_size=hparams["batch_size"],
+            )
+            test_scores = full_scores.loc[full_scores.index.isin(test_df.index)]
+            test_errors = test_scores["reconstruction_error"].values
+            n_anomalies = int(test_scores["is_anomaly"].sum())
             print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
 
             # Per-sensor scalar tracking
@@ -445,31 +390,28 @@ def main(
     encoding_layers = hparams["encoding_layers"]
 
     print("Training...")
-    if hparams["model_type"] == "ocsvm":
-        model = fit_ocsvm(train_df, nu=hparams["ocsvm_nu"])
-        train_errors = compute_ocsvm_errors(model, train_df)
-        test_errors = compute_ocsvm_errors(model, test_df)
-        threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
-        scores_df = score_ocsvm_set(model, test_df, threshold)
-    else:
-        model, train_loader, val_loader = _build_model_and_loaders(
-            n_features, encoding_layers, train_df, val_df, hparams, device
-        )
-        model = train_autoencoder(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            epochs=hparams["epochs"],
-            learning_rate=hparams["learning_rate"],
-            weight_decay=hparams["weight_decay"],
-            patience=hparams["patience"],
-            logger=logger,
-        )
-        train_errors, test_errors = _compute_errors(model, train_df, test_df, hparams, device)
-        threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
-        scores_df = _score_df(model, test_df, threshold, hparams, device)
-
-    n_anomalies = int((test_errors > threshold).sum())
+    full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+    model = train_model(
+        hparams["model_type"], train_df, val_df, device,
+        dense_layers=hparams["encoding_layers"],
+        seq_len=hparams["seq_len"],
+        batch_size=hparams["batch_size"],
+        epochs=hparams["epochs"],
+        learning_rate=hparams["learning_rate"],
+        weight_decay=hparams["weight_decay"],
+        patience=hparams["patience"],
+        logger=logger,
+        ocsvm_nu=hparams["ocsvm_nu"],
+    )
+    full_scores, threshold, train_errors = score_full(
+        model, hparams["model_type"], train_df, full_df,
+        hparams["threshold_percentile"], device,
+        seq_len=hparams["seq_len"],
+        batch_size=hparams["batch_size"],
+    )
+    scores_df = full_scores.loc[full_scores.index.isin(test_df.index)]
+    test_errors = scores_df["reconstruction_error"].values
+    n_anomalies = int(scores_df["is_anomaly"].sum())
     print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
 
     logger.report_scalar("metrics", "threshold", threshold, 0)
@@ -557,12 +499,6 @@ def main(
         upload_to_clearml=upload_to_clearml,
     )
 
-    print("Scoring full dataset for cross-period analysis...")
-    full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-    if hparams["model_type"] == "ocsvm":
-        full_scores = score_ocsvm_set(model, full_df, threshold)
-    else:
-        full_scores = _score_df(model, full_df, threshold, hparams, device)
     _publish_artifact(
         task,
         "full_scores",
