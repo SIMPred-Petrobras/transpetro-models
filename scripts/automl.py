@@ -98,6 +98,10 @@ def _init_clearml(args: argparse.Namespace, n_trials: int):
     if Task is None:
         raise RuntimeError("ClearML não está disponível neste ambiente.")
 
+    # Deve ser chamado antes de Task.init() para ser incluído no hash do venv
+    Task.add_requirements("pyarrow")
+    Task.add_requirements("torch", package_version="")  # já está na imagem Docker
+
     task = Task.init(
         project_name=args.clearml_project,
         task_name=args.clearml_task_name or f"automl-anomaly-{args.equipment}",
@@ -105,9 +109,6 @@ def _init_clearml(args: argparse.Namespace, n_trials: int):
         reuse_last_task_id=False,
     )
     task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
-    task.add_requirements("pyarrow")
-    # torch já está na imagem Docker — não reinstalar para evitar conflito de CUDA
-    task.add_requirements("torch", package_version="")
     task.connect({
         "equipment_id": args.equipment,
         "n_trials": n_trials,
