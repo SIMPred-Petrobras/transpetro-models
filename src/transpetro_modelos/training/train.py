@@ -42,6 +42,7 @@ def train_autoencoder(
     weight_decay: float,
     patience: int,
     logger=None,  # clearml Logger
+    return_val_loss: bool = False,
 ) -> torch.nn.Module:
     """
     Train the autoencoder with early stopping.
@@ -99,4 +100,4 @@ def train_autoencoder(
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    return model
+    return (model, best_val_loss) if return_val_loss else model
