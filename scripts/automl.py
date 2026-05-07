@@ -105,6 +105,8 @@ def _init_clearml(args: argparse.Namespace, n_trials: int):
         reuse_last_task_id=False,
     )
     task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
+    # torch já está na imagem Docker — não reinstalar para evitar conflito de CUDA
+    task.add_requirements("torch", package_version="")
     task.connect({
         "equipment_id": args.equipment,
         "n_trials": n_trials,

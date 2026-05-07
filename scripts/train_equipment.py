@@ -116,6 +116,7 @@ def main(
     base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
 
     Task.add_requirements("pyarrow")
+    Task.add_requirements("torch", package_version="")  # já está na imagem Docker
     model_suffix = "" if model_type == "dense" else f"-{model_type}"
     task_suffix = "" if preprocess_preset == "baseline" else f"-{preprocess_preset}"
     task_name = (
