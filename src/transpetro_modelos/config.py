@@ -20,6 +20,12 @@ class EquipmentConfig:
     val_start_date: Optional[datetime] = None  # fixed validation start date (e.g., Jul 1)
 
 
+_THERMAL_VIB_FEATURES = [
+    "Temperatura Bomba LNA",
+    "Vibração Bomba LNA",
+    "Temperatura Motor LNA",
+]
+
 B4064A_NOVOS_PREPROCESS_PRESETS: dict[str, list[dict]] = {
     "baseline": [
         {"step": "clip"},
@@ -37,6 +43,18 @@ B4064A_NOVOS_PREPROCESS_PRESETS: dict[str, list[dict]] = {
     ],
     "moving_average_knn": [
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
+        {"step": "moving_average", "window": 3, "min_periods": 1},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+    # Feature-selected presets: only the sensors that best capture bearing degradation
+    "thermal": [
+        {"step": "select_features", "features": _THERMAL_VIB_FEATURES},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+    "thermal_ma": [
+        {"step": "select_features", "features": _THERMAL_VIB_FEATURES},
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
@@ -77,6 +95,9 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "ffill", "limit": 6},
             {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
             {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
+            # Remove the first 2 h after each restart (warm-up period gives anomalous low temps).
+            # gap_minutes=90 avoids treating every 1-h interval as a restart.
+            {"step": "remove_transients", "minutes": 120, "gap_minutes": 90},
         ],
         preprocessing_steps=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS["baseline"]),
         preprocess_presets=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS),

@@ -31,16 +31,18 @@ def remove_negatives(df: pd.DataFrame, column: str) -> pd.DataFrame:
     df.loc[df[column] < 1, column] = np.nan
     return df
 
-def remove_transients(df: pd.DataFrame, minutes: int = 10) -> pd.DataFrame:
+def remove_transients(df: pd.DataFrame, minutes: int = 10, gap_minutes: int = 5) -> pd.DataFrame:
     """
     Remove the first N minutes after each pump restart.
-    Detects restarts as gaps > 5 minutes in the index.
+    Detects restarts as gaps > gap_minutes in the index (default 5 min).
+    For hourly resampled data, use gap_minutes=90 to avoid treating
+    every 1-h step as a restart.
     """
     if len(df) == 0:
         return df
 
     time_diff = df.index.to_series().diff()
-    gap_threshold = pd.Timedelta(minutes=5)
+    gap_threshold = pd.Timedelta(minutes=gap_minutes)
     restart_mask = time_diff > gap_threshold
     restart_indices = df.index[restart_mask]
 
