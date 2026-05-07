@@ -11,6 +11,10 @@ dependencies = [
     "matplotlib>=3.8.0",
     "clearml>=1.16.0",
     "openpyxl>=3.1.0",
+    "autokeras>=3.0.0",
+    "tensorflow>=2.21.0",
+    "keras-tuner>=1.4.8",
+    "clearml-agent>=3.0.1",
 ]
 
 [tool.setuptools.packages.find]
