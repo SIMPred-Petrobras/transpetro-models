@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import tensorflow as tf
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -16,6 +17,11 @@ from transpetro_modelos.data.loading import load_equipment_data
 from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
+from transpetro_modelos.models.autokeras import (
+    train_autokeras_autoencoder,
+    compute_reconstruction_errors_autokeras,
+    score_dataset_autokeras,
+)
 from transpetro_modelos.training.train import train_autoencoder, make_dataloader, make_sequence_dataloader
 from transpetro_modelos.training.evaluate import (
     compute_ocsvm_errors,
@@ -27,7 +33,6 @@ from transpetro_modelos.training.evaluate import (
     score_test_set,
     score_test_set_sequence,
 )
-
 
 def _sensor_slug(sensor_name: str) -> str:
     return re.sub(r"[^0-9a-zA-Z]+", "_", sensor_name).strip("_").lower()
@@ -171,7 +176,8 @@ def main(
         task_name=task_name,
         output_uri=True,
     )
-    task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
+    #task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
+    task.set_base_docker("tensorflow/tensorflow:2.15.0-gpu")
 
     hparams = {
         "equipment_id": equipment_id,
@@ -458,6 +464,38 @@ def main(
         test_errors = compute_ocsvm_errors(model, test_df)
         threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
         scores_df = score_ocsvm_set(model, test_df, threshold)
+
+
+    elif hparams["model_type"] == "autokeras":
+        print("Training AutoKeras model...")
+
+        model = train_autokeras_autoencoder(
+            train_df=train_df,
+            val_df=val_df,
+            epochs=hparams["epochs"],
+            max_trials=10,
+        )
+
+        train_errors = compute_reconstruction_errors_autokeras(
+            model,
+            train_df,
+        )
+
+        test_errors = compute_reconstruction_errors_autokeras(
+            model,
+            test_df,
+        )
+
+        threshold = determine_threshold(
+            train_errors,
+            percentile=hparams["threshold_percentile"],
+        )
+
+        scores_df = score_dataset_autokeras(
+            model,
+            test_df,
+            threshold,
+        )
     else:
         model, train_loader, val_loader = _build_model_and_loaders(
             n_features, encoding_layers, train_df, val_df, hparams, device
@@ -495,6 +533,20 @@ def main(
             local_dir=local_task_dir,
             upload_to_clearml=upload_to_clearml,
         )
+
+    elif hparams["model_type"] == "autokeras":
+        model_path = f"model_{equipment_id}.keras"
+
+        model.save(model_path)
+
+        _publish_artifact(
+            task,
+            "model_file",
+            model_path,
+            local_dir=local_task_dir,
+            upload_to_clearml=upload_to_clearml,
+        )
+
     else:
         model_path = f"model_{equipment_id}.pt"
         torch.save(model.state_dict(), model_path)
@@ -610,8 +662,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         default="dense",
-        choices=["dense", "lstm", "ocsvm"],
-        help="Modelo: dense (padrao), lstm ou ocsvm",
+        choices=["dense", "lstm", "ocsvm", "autokeras"],
+        help="Modelo: dense (padrao), lstm, ocsvm ou autokeras",
     )
     parser.add_argument(
         "--ocsvm-nu",
