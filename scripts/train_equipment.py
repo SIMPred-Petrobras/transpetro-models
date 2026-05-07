@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-import tensorflow as tf
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -17,11 +16,6 @@ from transpetro_modelos.data.loading import load_equipment_data
 from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
-from transpetro_modelos.models.autokeras import (
-    train_autokeras_autoencoder,
-    compute_reconstruction_errors_autokeras,
-    score_dataset_autokeras,
-)
 from transpetro_modelos.training.train import train_autoencoder, make_dataloader, make_sequence_dataloader
 from transpetro_modelos.training.evaluate import (
     compute_ocsvm_errors,
@@ -164,6 +158,7 @@ def main(
     base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
 
     Task.add_requirements("pyarrow")
+    Task.add_requirements("torch", package_version="")
     model_suffix = "" if model_type == "dense" else f"-{model_type}"
     task_suffix = "" if preprocess_preset == "baseline" else f"-{preprocess_preset}"
     task_name = (
@@ -176,9 +171,8 @@ def main(
         task_name=task_name,
         output_uri=True,
     )
-    #task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
-    task.set_base_docker("tensorflow/tensorflow:2.15.0-gpu")
-
+    task.set_base_docker(docker_image="pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
+        
     hparams = {
         "equipment_id": equipment_id,
         "encoding_layers": None,  # None = auto based on n_features
@@ -247,8 +241,6 @@ def main(
     logger = task.get_logger()
     base_steps = hparams["preprocessing_steps"]
     local_task_dir = Path(local_artifacts_dir) / f"{task.id}_{equipment_id}"
-
-    
 
     if per_sensor:
         sensors = list(df.columns)
@@ -465,37 +457,6 @@ def main(
         threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
         scores_df = score_ocsvm_set(model, test_df, threshold)
 
-
-    elif hparams["model_type"] == "autokeras":
-        print("Training AutoKeras model...")
-
-        model = train_autokeras_autoencoder(
-            train_df=train_df,
-            val_df=val_df,
-            epochs=hparams["epochs"],
-            max_trials=10,
-        )
-
-        train_errors = compute_reconstruction_errors_autokeras(
-            model,
-            train_df,
-        )
-
-        test_errors = compute_reconstruction_errors_autokeras(
-            model,
-            test_df,
-        )
-
-        threshold = determine_threshold(
-            train_errors,
-            percentile=hparams["threshold_percentile"],
-        )
-
-        scores_df = score_dataset_autokeras(
-            model,
-            test_df,
-            threshold,
-        )
     else:
         model, train_loader, val_loader = _build_model_and_loaders(
             n_features, encoding_layers, train_df, val_df, hparams, device
@@ -530,19 +491,6 @@ def main(
             task,
             "model_file",
             model,
-            local_dir=local_task_dir,
-            upload_to_clearml=upload_to_clearml,
-        )
-
-    elif hparams["model_type"] == "autokeras":
-        model_path = f"model_{equipment_id}.keras"
-
-        model.save(model_path)
-
-        _publish_artifact(
-            task,
-            "model_file",
-            model_path,
             local_dir=local_task_dir,
             upload_to_clearml=upload_to_clearml,
         )
