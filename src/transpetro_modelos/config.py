@@ -9,13 +9,13 @@ class EquipmentConfig:
     failure_date: datetime
     failure_description: str
     dataset_name: str
-    datetime_column: Optional[str]  # "Data Hora" para B-402E, "Timestamp" para B-4064A novos, None para demais
+    datetime_column: Optional[str]
     exclusion_days_before: int
     preprocessing_steps: list[dict]
-    pre_split_steps: list[dict] = field(default_factory=list)  # resample, filter_running (roda antes do split)
+    pre_split_steps: list[dict] = field(default_factory=list)
     preprocess_presets: dict[str, list[dict]] = field(default_factory=dict)
-    local_feather: Optional[str] = None  # override path for local loading (relative to project root)
-    val_start_date: Optional[datetime] = None  # fixed validation start date (e.g., Jul 1)
+    local_feather: Optional[str] = None
+    val_start_date: Optional[datetime] = None
     val_end_date: Optional[datetime] = None
 
 
@@ -67,6 +67,18 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
     ],
 }
 
+RAW_PRESETS = {
+    k: deepcopy(v)
+    for k, v in PREPROCESSING_PIPELINES.items()
+    if k.endswith("_raw")
+}
+
+INTERPOLATED_PRESETS = {
+    k: deepcopy(v)
+    for k, v in PREPROCESSING_PIPELINES.items()
+    if k.endswith("_interpolated")
+}
+
 
 EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
     "B-4064A": EquipmentConfig(
@@ -84,7 +96,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "resample", "freq": "1h"}
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_raw"]),
-        preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
+        preprocess_presets=RAW_PRESETS,
     ),
 
     "B-4064A_interpolated": EquipmentConfig(
@@ -102,7 +114,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "remove_transients", "minutes": 10},
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
-        preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
+        preprocess_presets=INTERPOLATED_PRESETS,
     ),
 
     "B-3403C_interpolated": EquipmentConfig(
@@ -120,7 +132,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "remove_transients", "minutes": 10},
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
-        preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
+        preprocess_presets=INTERPOLATED_PRESETS,
     ),
 
     "B-90001A_interpolated": EquipmentConfig(
@@ -138,7 +150,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "remove_transients", "minutes": 10},
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
-        preprocess_presets=deepcopy(PREPROCESSING_PIPELINES)
+        preprocess_presets=INTERPOLATED_PRESETS,
     )
 }
 

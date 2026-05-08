@@ -40,13 +40,13 @@ def filter_threshold(df: pd.DataFrame, columns: list[str], threshold: float) -> 
 def remove_transients(df: pd.DataFrame, minutes: int = 10) -> pd.DataFrame:
     """
     Remove the first N minutes after each pump restart.
-    Detects restarts as gaps > 5 minutes in the index.
+    Detects restarts as gaps > N minutes in the index.
     """
     if len(df) == 0:
         return df
 
     time_diff = df.index.to_series().diff()
-    gap_threshold = pd.Timedelta(minutes=5)
+    gap_threshold = pd.Timedelta(minutes=minutes)
     restart_mask = time_diff > gap_threshold
     restart_indices = df.index[restart_mask]
 
