@@ -4,7 +4,6 @@ AutoML para Detecção de Anomalias
 Modelos : Dense Autoencoder | LSTM Autoencoder | One-Class SVM
 Seleção : Score composto (val_loss + anomaly_rate + threshold_ratio)
 Busca   : Grid search declarativo via build_trials()
-Modos   : Multivariado e Per-sensor (--per-sensor)
 
 Uso rápido:
     python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --quick
@@ -71,12 +70,10 @@ class TrialConfig:
     - lstm: Autoencoder sequencial para séries temporais
     - ocsvm: One-Class SVM para detecção de outliers
     """
+    val_start: datetime | None  # None = usa val_fraction=0.2 do temporal_split
     preset: str
     model: ModelType
     threshold_percentile: float
-
-    # Splitting
-    val_start: datetime | None = None  # None = usa val_fraction padrão do temporal_split
 
     # Dense hyperparameters
     learning_rate: float = 1e-3
@@ -146,15 +143,6 @@ class TrialConfig:
             else "auto"
         )
         return d
-
-
-@dataclass
-class PreprocessedData:
-    """Container para dados pré-processados."""
-    train_df: pd.DataFrame
-    val_df: pd.DataFrame
-    full_df: pd.DataFrame
-    artifacts: PreprocessingArtifacts
 
 
 # ── Standalone model helpers ───────────────────────────────────────────────────
@@ -374,10 +362,10 @@ def build_trials(
         if model == "dense":
             for lr, bs, layers in product(_lrs, _batches, _layers):
                 trials.append(TrialConfig(
+                    val_start=val_start,
                     preset=preset,
                     model=model,
                     threshold_percentile=threshold,
-                    val_start=val_start,
                     learning_rate=lr,
                     batch_size=bs,
                     dense_layers=layers,
@@ -388,10 +376,10 @@ def build_trials(
         elif model == "lstm":
             for sl, hd, nl in product(_seq_lens, _hidden, _nlayers):
                 trials.append(TrialConfig(
+                    val_start=val_start,
                     preset=preset,
                     model=model,
                     threshold_percentile=threshold,
-                    val_start=val_start,
                     seq_len=sl,
                     lstm_hidden_dim=hd,
                     lstm_num_layers=nl,
@@ -402,10 +390,10 @@ def build_trials(
         elif model == "ocsvm":
             for nu, gamma in product(_nus, _gammas):
                 trials.append(TrialConfig(
+                    val_start=val_start,
                     preset=preset,
                     model=model,
                     threshold_percentile=threshold,
-                    val_start=val_start,
                     ocsvm_nu=nu,
                     ocsvm_gamma=gamma,
                 ))
@@ -420,41 +408,62 @@ def build_trials(
 
 def run_trial(
     trial: TrialConfig,
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    full_df: pd.DataFrame,
+    equipment_id: str,
+    df_pre: pd.DataFrame,
     device: str,
-    failure_date: datetime | None = None,
     prefailure_days: int = 30,
     normal_end_days: int = 60,
     logger=None,
-    label_prefix: str = "",
     trial_idx: int = 0,
 ) -> dict[str, Any] | None:
     """
-    Executa um trial completo: treino → scoring → métricas.
+    Executa um trial completo: split → preprocessing → treino → scoring → métricas.
 
     Args:
         trial: Configuração do trial
-        train_df: Dados de treino pré-processados
-        val_df: Dados de validação pré-processados
-        full_df: Dados completos para scoring
+        equipment_id: ID do equipamento
+        df_pre: Dados PRÉ-split (após pre_split_steps)
         device: "cuda" ou "cpu"
-        failure_date: Data de falha (se disponível) para métricas contextuais
         prefailure_days: Janela pré-falha em dias
         normal_end_days: Fim do período normal (dias antes da falha)
         logger: Logger do ClearML
-        label_prefix: Prefixo para métricas no logger
         trial_idx: Índice do trial (para logging)
 
     Returns:
-        Dict com métricas e objetos (_model, _scores_df) ou None se dados insuficientes
+        Dict com métricas e objetos (_model, _scores_df, _artifacts) ou None se dados insuficientes
     """
-    min_rows = trial.seq_len + 1 if trial.model == "lstm" else 50
+    config = EQUIPMENT_CONFIGS[equipment_id]
+    min_rows = max(50, trial.seq_len + 1 if trial.model == "lstm" else 50)
 
-    if len(train_df) < min_rows or len(val_df) < min_rows:
+    # 1. SPLIT específico deste trial
+    splits = temporal_split(
+        df_pre,
+        val_start_date=trial.val_start,
+        val_end_date=getattr(config, "val_end_date", None),
+    )
+
+    if len(splits["train"]) < min_rows or len(splits["val"]) < min_rows:
         return None
 
+    # 2. PREPROCESSING depois do split
+    steps = get_preprocessing_steps(equipment_id, preset=trial.preset)
+    train_df, artifacts, _ = run_preprocessing(
+        splits["train"], steps, return_artifacts=True, return_report=True
+    )
+    val_df, _, _ = run_preprocessing(
+        splits["val"], steps, fitted_artifacts=artifacts,
+        return_artifacts=True, return_report=True
+    )
+    full_raw = pd.concat([splits["train"], splits["val"], splits["test"]]).sort_index()
+    full_df, _, _ = run_preprocessing(
+        full_raw, steps, fitted_artifacts=artifacts,
+        return_artifacts=True, return_report=True
+    )
+
+    if len(train_df) < min_rows or len(val_df) < min_rows or len(full_df) < min_rows:
+        return None
+
+    # 3. TREINO
     model, val_loss = train_model(
         trial.model,
         train_df,
@@ -474,6 +483,7 @@ def run_trial(
         logger=logger,
     )
 
+    # 4. SCORING
     scores_df, threshold, train_errors = score_full(
         model,
         trial.model,
@@ -488,6 +498,9 @@ def run_trial(
     n_anomalies = int(scores_df["is_anomaly"].sum())
     anomaly_rate = float(scores_df["is_anomaly"].mean())
 
+    # 5. MÉTRICAS
+    failure_date = getattr(config, "failure_date", None)
+    
     if failure_date is not None:
         metrics = failure_detection_metrics(
             scores_df,
@@ -509,9 +522,9 @@ def run_trial(
         }
         composite_score = anomaly_rate
 
+    # 6. LOGGING
     if logger:
-        prefix = f"{label_prefix}/" if label_prefix else ""
-        series = f"{prefix}automl/{trial.model}"
+        series = f"automl/{trial.model}"
         logger.report_scalar(series, "val_loss", val_loss, trial_idx)
         logger.report_scalar(series, "composite_score", composite_score, trial_idx)
         logger.report_scalar(series, "n_anomalies", n_anomalies, trial_idx)
@@ -519,6 +532,7 @@ def run_trial(
         logger.report_scalar(series, "prefailure_alert_rate", float(metrics["prefailure_alert_rate"]), trial_idx)
         logger.report_scalar(series, "normal_alert_rate", float(metrics["normal_alert_rate"]), trial_idx)
 
+    # 7. RESULTADO
     row = trial.to_dict()
     row.update({
         "trial_label": trial.label(),
@@ -526,6 +540,8 @@ def run_trial(
         "threshold": threshold,
         "train_score_mean": float(train_errors.mean()),
         "train_score_std": float(train_errors.std()),
+        "train_samples": len(train_df),
+        "val_samples": len(val_df),
         "n_anomalies": n_anomalies,
         "anomaly_rate": anomaly_rate,
         "scored_samples": len(scores_df),
@@ -533,6 +549,7 @@ def run_trial(
         "pct_anomalies": anomaly_rate,
         "_model": model,
         "_scores_df": scores_df,
+        "_artifacts": artifacts,
     })
     row.update(metrics)
 
@@ -551,61 +568,6 @@ def rank_results(rows: list[dict[str, Any]]) -> pd.DataFrame:
         )
         .reset_index(drop=True)
     )
-
-
-# ── Preprocessing cache ────────────────────────────────────────────────────────
-
-def build_preprocessing_cache(
-    equipment_id: str,
-    splits: dict[str, pd.DataFrame],
-    presets: list[str],
-) -> dict[str, PreprocessedData]:
-    """
-    Pré-processa todos os presets de uma vez para evitar reprocessamento.
-
-    Args:
-        equipment_id: ID do equipamento
-        splits: Dict com keys 'train', 'val', 'test'
-        presets: Lista de nomes de presets
-
-    Returns:
-        Dict mapeando preset -> PreprocessedData
-    """
-    cache: dict[str, PreprocessedData] = {}
-
-    full_raw = pd.concat([
-        splits["train"],
-        splits["val"],
-        splits["test"],
-    ]).sort_index()
-
-    for preset in presets:
-        print(f"  Preprocessing preset='{preset}'...")
-
-        steps = get_preprocessing_steps(equipment_id, preset=preset)
-
-        train_df, artifacts, _ = run_preprocessing(
-            splits["train"], steps, return_artifacts=True, return_report=True,
-        )
-        val_df, _, _ = run_preprocessing(
-            splits["val"], steps, fitted_artifacts=artifacts,
-            return_artifacts=True, return_report=True,
-        )
-        full_df, _, _ = run_preprocessing(
-            full_raw, steps, fitted_artifacts=artifacts,
-            return_artifacts=True, return_report=True,
-        )
-
-        cache[preset] = PreprocessedData(
-            train_df=train_df,
-            val_df=val_df,
-            full_df=full_df,
-            artifacts=artifacts,
-        )
-
-        print(f"  Train: {train_df.shape} | Val: {val_df.shape} | Full: {full_df.shape}")
-
-    return cache
 
 
 # ── Relatórios formatados ──────────────────────────────────────────────────────
@@ -668,13 +630,13 @@ def print_final_summary(
     print(f"Duração: {duration_seconds / 60:.1f} min")
     print()
     print("MELHOR CONFIGURAÇÃO:")
-    print(f"  Modelo    : {best_result['model']}")
-    print(f"  Preset    : {best_result['preset']}")
-    print(f"  Val Start : {best_result.get('val_start') or 'auto'}")
-    print(f"  Score     : {best_result['composite_score']:.5f}")
-    print(f"  Val Loss  : {best_result['val_loss']:.5f}")
-    print(f"  Threshold : {best_result['threshold']:.5f}")
-    print(f"  Anomalias : {best_result['n_anomalies']}/{best_result['scored_samples']}")
+    print(f"Modelo: {best_result['model']}")
+    print(f"Preset: {best_result['preset']}")
+    print(f"Val Start: {best_result.get('val_start') or 'auto'}")
+    print(f"Score: {best_result['composite_score']:.5f}")
+    print(f"Val Loss: {best_result['val_loss']:.5f}")
+    print(f"Threshold: {best_result['threshold']:.5f}")
+    print(f"Anomalias: {best_result['n_anomalies']}/{best_result['scored_samples']}")
     print("=" * 70 + "\n")
 
 
@@ -818,11 +780,9 @@ def main(
     Etapas:
     1. Setup: ClearML, device, configuração
     2. Data Loading: carrega e pré-processa dados
-    3. Splitting: divisão temporal train/val/test
-    4. Trial Generation: monta grade de busca
-    5. Preprocessing Cache: pré-processa todos os presets
-    6. Execution: executa trials
-    7. Reporting: salva resultados e artifacts
+    3. Trial Generation: monta grade de busca
+    4. Execution: executa trials (cada trial faz seu próprio split + preprocessing)
+    5. Reporting: salva resultados e artifacts
     """
     start_time = time.time()
 
@@ -844,7 +804,7 @@ def main(
     Task.add_requirements("torch", package_version="")
 
     speed_suffix = "quick" if quick else "full"
-    task_name = f"automl_{equipment_id}_multivariate_{speed_suffix}"
+    task_name = f"automl_{equipment_id}_{speed_suffix}"
 
     task = Task.init(
         project_name="Transpetro",
@@ -881,38 +841,23 @@ def main(
     # ══════════════════════════════════════════════════════════════
 
     print("ETAPA 2: Carregando dados...")
-    df = load_equipment_data(equipment_id, from_clearml=not local_data)
-    print(f"  Shape inicial: {df.shape}")
-    print(f"  Período: {df.index.min()} até {df.index.max()}")
+    df_raw = load_equipment_data(equipment_id, from_clearml=not local_data)
+    print(f"  Shape inicial: {df_raw.shape}")
+    print(f"  Período: {df_raw.index.min()} até {df_raw.index.max()}")
 
+    # Aplica apenas pre_split_steps (se existir)
     if getattr(config, "pre_split_steps", None):
         print("  Aplicando pré-split preprocessing...")
-        df, _, _, _ = run_preprocessing(df, config.pre_split_steps, return_report=True)
-        print(f"  Shape pós pré-split: {df.shape}")
+        df_pre, _, _ = run_preprocessing(df_raw, config.pre_split_steps)
+        print(f"  Shape pós pré-split: {df_pre.shape}")
+    else:
+        df_pre = df_raw
 
     # ══════════════════════════════════════════════════════════════
-    # ETAPA 3: TEMPORAL SPLITTING
+    # ETAPA 3: TRIAL GENERATION
     # ══════════════════════════════════════════════════════════════
 
-    print("\nETAPA 3: Split temporal...")
-
-    split_kwargs = {}
-    if hasattr(config, "val_start_date") and config.val_start_date:
-        split_kwargs["val_start_date"] = config.val_start_date
-    if hasattr(config, "val_end_date") and config.val_end_date:
-        split_kwargs["val_end_date"] = config.val_end_date
-
-    splits = temporal_split(df, **split_kwargs)
-
-    print(f"  Train: {splits['train'].shape} [{splits['train'].index.min()} → {splits['train'].index.max()}]")
-    print(f"  Val  : {splits['val'].shape} [{splits['val'].index.min()} → {splits['val'].index.max()}]")
-    print(f"  Test : {splits['test'].shape} [{splits['test'].index.min()} → {splits['test'].index.max()}]")
-
-    # ══════════════════════════════════════════════════════════════
-    # ETAPA 4: TRIAL GENERATION
-    # ══════════════════════════════════════════════════════════════
-
-    print("\nETAPA 4: Gerando grid de trials...")
+    print("\nETAPA 3: Gerando grid de trials...")
     trials = build_trials(
         equipment_id=equipment_id,
         models=hparams["models"],
@@ -930,19 +875,10 @@ def main(
         print(f"    {model_type:8s}: {count:4d} trials")
 
     # ══════════════════════════════════════════════════════════════
-    # ETAPA 5: PREPROCESSING CACHE
+    # ETAPA 4: EXECUTION
     # ══════════════════════════════════════════════════════════════
 
-    print("\nETAPA 5: Preparando cache de preprocessing...")
-    presets = sorted(set(t.preset for t in trials))
-    preprocessing_cache = build_preprocessing_cache(equipment_id, splits, presets)
-    print(f"  ✓ {len(preprocessing_cache)} presets em cache\n")
-
-    # ══════════════════════════════════════════════════════════════
-    # ETAPA 6: EXECUTION
-    # ══════════════════════════════════════════════════════════════
-
-    print("=" * 70)
+    print("\n" + "=" * 70)
     print(f"{'EXECUÇÃO DE TRIALS':^70}")
     print("=" * 70)
 
@@ -951,21 +887,15 @@ def main(
     n_skipped = 0
     n_failed = 0
 
-    failure_date = getattr(config, "failure_date", None)
-
     for i, trial in enumerate(trials, 1):
         print_trial_header(i, len(trials), trial)
-
-        pdata = preprocessing_cache[trial.preset]
 
         try:
             row = run_trial(
                 trial=trial,
-                train_df=pdata.train_df,
-                val_df=pdata.val_df,
-                full_df=pdata.full_df,
+                equipment_id=equipment_id,
+                df_pre=df_pre,  # Passa dados PRÉ-split
                 device=device,
-                failure_date=failure_date,
                 prefailure_days=prefailure_days,
                 normal_end_days=normal_end_days,
                 logger=logger,
@@ -982,17 +912,19 @@ def main(
             n_skipped += 1
             continue
 
-        row["_artifacts"] = pdata.artifacts
         print_trial_result(row)
 
+        # Mantém apenas o melhor modelo na memória
         if best_row is None or row["composite_score"] > best_row["composite_score"]:
             if best_row is not None:
                 best_row.pop("_model", None)
                 best_row.pop("_scores_df", None)
+                best_row.pop("_artifacts", None)
             best_row = row
         else:
             row.pop("_model", None)
             row.pop("_scores_df", None)
+            row.pop("_artifacts", None)
 
         rows.append({k: v for k, v in row.items() if not k.startswith("_")})
 
@@ -1000,7 +932,7 @@ def main(
         raise RuntimeError("Todos os trials falharam.")
 
     # ══════════════════════════════════════════════════════════════
-    # ETAPA 7: REPORTING
+    # ETAPA 5: REPORTING
     # ══════════════════════════════════════════════════════════════
 
     print("\n" + "=" * 70)
@@ -1039,7 +971,7 @@ def main(
         duration_seconds=duration,
     )
 
-    print(f"Artifacts salvos em: {output_dir}")
+    print(f"\nArtifacts salvos em: {output_dir}")
     if upload_to_clearml:
         print(f"Artifacts também enviados ao ClearML (Task ID: {task.id})")
 
