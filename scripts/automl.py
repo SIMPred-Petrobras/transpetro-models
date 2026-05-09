@@ -241,7 +241,9 @@ def run_grid_search(args: argparse.Namespace):
         if task is not None:
             task.upload_artifact("automl_results", artifact_object=results)
             task.upload_artifact("best_full_scores", artifact_object=best_scores)
-            task.upload_artifact("best_trial", artifact_object={"trial": asdict(best_trial), "results": best_row})
+            trial_dict = asdict(best_trial)
+            trial_dict["val_start"] = best_trial.val_start.isoformat() if best_trial.val_start else None
+            task.upload_artifact("best_trial", artifact_object={"trial": trial_dict, "results": best_row})
 
     if task is not None and best_row is not None:
         logger = task.get_logger()
