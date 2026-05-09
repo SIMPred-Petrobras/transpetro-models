@@ -29,6 +29,74 @@ def score_ocsvm_set(clf, df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     )
 
 
+def fit_isolation_forest(
+    train_df: pd.DataFrame,
+    n_estimators: int = 100,
+    contamination: str = "auto",
+    random_state: int = 42,
+):
+    from sklearn.ensemble import IsolationForest
+
+    clf = IsolationForest(
+        n_estimators=n_estimators,
+        contamination=contamination,
+        random_state=random_state,
+    )
+    clf.fit(train_df.values.astype("float32"))
+    return clf
+
+
+def compute_isolation_forest_errors(clf, df: pd.DataFrame) -> np.ndarray:
+    # score_samples retorna valores maiores para normais; negamos para que maior = mais anômalo
+    return (-clf.score_samples(df.values.astype("float32"))).astype("float32")
+
+
+def score_isolation_forest_set(clf, df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    errors = compute_isolation_forest_errors(clf, df)
+    return pd.DataFrame(
+        {"reconstruction_error": errors, "is_anomaly": errors > threshold},
+        index=df.index,
+    )
+
+
+def compute_vae_errors(
+    model: torch.nn.Module,
+    df: pd.DataFrame,
+    device: str = "cpu",
+    batch_size: int = 512,
+) -> np.ndarray:
+    """MSE de reconstrução usando a média do espaço latente (sem sampling)."""
+    from torch.utils.data import DataLoader, TensorDataset
+
+    model.eval()
+    tensor = torch.tensor(df.values, dtype=torch.float32).to(device)
+    dataset = TensorDataset(tensor)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    errors = []
+    with torch.no_grad():
+        for (batch,) in loader:
+            recon, _, _ = model(batch)
+            mse = F.mse_loss(recon, batch, reduction="none").mean(dim=1)
+            errors.extend(mse.cpu().numpy())
+
+    return np.array(errors)
+
+
+def score_vae_set(
+    model: torch.nn.Module,
+    df: pd.DataFrame,
+    threshold: float,
+    device: str = "cpu",
+    batch_size: int = 512,
+) -> pd.DataFrame:
+    errors = compute_vae_errors(model, df, device=device, batch_size=batch_size)
+    return pd.DataFrame(
+        {"reconstruction_error": errors, "is_anomaly": errors > threshold},
+        index=df.index,
+    )
+
+
 def compute_reconstruction_errors_sequence(
     model: torch.nn.Module,
     df: pd.DataFrame,

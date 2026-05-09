@@ -106,3 +106,75 @@ def train_autoencoder(
         model.load_state_dict(best_state)
 
     return model
+
+
+def train_vae(
+    model: torch.nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    epochs: int,
+    learning_rate: float,
+    weight_decay: float,
+    patience: int,
+    beta: float = 1.0,
+    logger=None,
+) -> torch.nn.Module:
+    """Treina VAE com ELBO = MSE + beta * KL. Retorna o modelo com melhor val_loss."""
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=max(5, patience // 4), min_lr=1e-6
+    )
+
+    best_val_loss = float("inf")
+    best_state = None
+    patience_counter = 0
+
+    for epoch in range(epochs):
+        model.train()
+        train_losses = []
+        for (batch,) in train_loader:
+            optimizer.zero_grad()
+            recon, mean, log_var = model(batch)
+            recon_loss = F.mse_loss(recon, batch)
+            kl_loss = -0.5 * torch.mean(1 + log_var - mean.pow(2) - log_var.exp())
+            loss = recon_loss + beta * kl_loss
+            loss.backward()
+            optimizer.step()
+            train_losses.append(loss.item())
+
+        model.eval()
+        val_losses = []
+        with torch.no_grad():
+            for (batch,) in val_loader:
+                recon, mean, log_var = model(batch)
+                recon_loss = F.mse_loss(recon, batch)
+                kl_loss = -0.5 * torch.mean(1 + log_var - mean.pow(2) - log_var.exp())
+                val_losses.append((recon_loss + beta * kl_loss).item())
+
+        avg_train = float(np.mean(train_losses))
+        avg_val = float(np.mean(val_losses))
+        scheduler.step(avg_val)
+
+        if logger is not None:
+            logger.report_scalar("loss", "train", avg_train, epoch)
+            logger.report_scalar("loss", "validation", avg_val, epoch)
+            logger.report_scalar("loss", "lr", optimizer.param_groups[0]["lr"], epoch)
+
+        if avg_val < best_val_loss:
+            best_val_loss = avg_val
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch + 1} (best val_loss={best_val_loss:.6f})")
+                break
+
+        if (epoch + 1) % 10 == 0:
+            lr = optimizer.param_groups[0]["lr"]
+            print(f"Epoch {epoch + 1}/{epochs} — train: {avg_train:.6f}, val: {avg_val:.6f}, lr: {lr:.2e}")
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    return model

@@ -69,3 +69,64 @@ class DenseAutoencoder(nn.Module):
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
         return decoded, encoded
+
+
+class VAE(nn.Module):
+    """Variational Autoencoder para detecção de anomalias.
+
+    Usa MSE de reconstrução como score (sem KL em inferência).
+    Em treino, aplica reparameterization trick; em eval, usa a média diretamente.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        encoding_layers: Optional[list[int]] = None,
+        latent_dim: int = 8,
+    ):
+        super().__init__()
+        if encoding_layers is None:
+            encoding_layers = _default_encoding_layers(input_dim)
+
+        # Encoder: input_dim → encoding_layers → mean / log_var
+        enc_dims = [input_dim] + encoding_layers
+        enc_layers: list[nn.Module] = []
+        for i in range(len(enc_dims) - 1):
+            enc_layers.append(nn.Linear(enc_dims[i], enc_dims[i + 1]))
+            enc_layers.append(nn.BatchNorm1d(enc_dims[i + 1]))
+            enc_layers.append(nn.ReLU())
+        self.encoder = nn.Sequential(*enc_layers)
+        self.fc_mean = nn.Linear(encoding_layers[-1], latent_dim)
+        self.fc_log_var = nn.Linear(encoding_layers[-1], latent_dim)
+
+        # Decoder: latent_dim → reversed(encoding_layers) → input_dim
+        dec_dims = [latent_dim] + list(reversed(encoding_layers))
+        dec_layers: list[nn.Module] = []
+        for i in range(len(dec_dims) - 1):
+            dec_layers.append(nn.Linear(dec_dims[i], dec_dims[i + 1]))
+            if i < len(dec_dims) - 2:
+                dec_layers.append(nn.BatchNorm1d(dec_dims[i + 1]))
+                dec_layers.append(nn.ReLU())
+        dec_layers.append(nn.Linear(dec_dims[-1], input_dim))
+        self.decoder = nn.Sequential(*dec_layers)
+
+        self.latent_dim = latent_dim
+
+    def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        h = self.encoder(x)
+        return self.fc_mean(h), self.fc_log_var(h)
+
+    def reparameterize(self, mean: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            std = torch.exp(0.5 * log_var)
+            return mean + torch.randn_like(std) * std
+        return mean  # inferência determinística
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        return self.decoder(z)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        mean, log_var = self.encode(x)
+        z = self.reparameterize(mean, log_var)
+        recon = self.decode(z)
+        return recon, mean, log_var

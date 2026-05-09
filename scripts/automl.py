@@ -18,6 +18,7 @@ import argparse
 import pickle
 import sys
 import warnings
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -85,7 +86,7 @@ def _save_best_artifacts(
     best_scores.to_parquet(output_dir / "best_full_scores.parquet")
     with (output_dir / "best_trial.pkl").open("wb") as f:
         pickle.dump({"trial": best_trial, "results": best_row}, f)
-    if best_trial.model == "ocsvm":
+    if best_trial.model in ("ocsvm", "isolation_forest"):
         with (output_dir / "best_model.pkl").open("wb") as f:
             pickle.dump(best_model, f)
     else:
@@ -148,6 +149,8 @@ def run_grid_search(args: argparse.Namespace):
         lstm_layers=_parse_ints(args.lstm_layers, []) or None,
         ocsvm_nus=_parse_floats(args.ocsvm_nus, []) or None,
         ocsvm_gammas=args.ocsvm_gammas or None,
+        latent_dims=_parse_ints(args.latent_dims, []) or None,
+        if_n_estimators_list=_parse_ints(args.if_n_estimators, []) or None,
         epochs=args.epochs if args.epochs is not None else 100,
         patience=args.patience if args.patience is not None else 10,
         quick=args.quick,
@@ -292,6 +295,9 @@ def _retrain_best(trial: TrialConfig, equipment_id: str, df_pre, device: str):
         weight_decay=trial.weight_decay,
         ocsvm_nu=trial.ocsvm_nu,
         ocsvm_gamma=trial.ocsvm_gamma,
+        latent_dim=trial.latent_dim,
+        vae_beta=trial.vae_beta,
+        if_n_estimators=trial.if_n_estimators,
     )
     scores, _, _ = score_full(
         model, trial.model, train_df, full_df,
@@ -314,7 +320,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Carrega dados locais em vez do ClearML Dataset")
     parser.add_argument("--quick", action="store_true",
                         help="Busca rápida: menos presets, modelos e epochs (smoke test)")
-    parser.add_argument("--models", nargs="+", choices=["dense", "lstm", "ocsvm"], default=None)
+    parser.add_argument("--models", nargs="+",
+                        choices=["dense", "lstm", "ocsvm", "vae", "isolation_forest"], default=None)
     parser.add_argument("--presets", nargs="+", default=None,
                         help="Presets de preprocessing (default: todos disponíveis para o equipamento)")
     parser.add_argument("--thresholds", nargs="+", default=None,
@@ -336,6 +343,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lstm-layers", nargs="+", default=None)
     parser.add_argument("--ocsvm-nus", nargs="+", default=None)
     parser.add_argument("--ocsvm-gammas", nargs="+", default=None)
+    parser.add_argument("--latent-dims", nargs="+", default=None,
+                        help="Dimensões do espaço latente do VAE (default: 8)")
+    parser.add_argument("--if-n-estimators", nargs="+", default=None,
+                        help="Número de árvores do Isolation Forest (default: 100)")
     parser.add_argument("--remote", action="store_true",
                         help="Envia para execução remota no ClearML (implica --clearml)")
     parser.add_argument("--queue", default="default",

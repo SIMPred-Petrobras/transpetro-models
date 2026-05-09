@@ -21,22 +21,28 @@ import torch
 from transpetro_modelos.config import EQUIPMENT_CONFIGS, get_preprocessing_steps
 from transpetro_modelos.data.preprocessing import run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
-from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
+from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder, VAE
 from transpetro_modelos.training.evaluate import (
+    compute_isolation_forest_errors,
     compute_ocsvm_errors,
     compute_reconstruction_errors,
     compute_reconstruction_errors_sequence,
+    compute_vae_errors,
     determine_threshold,
     failure_detection_metrics,
+    fit_isolation_forest,
     fit_ocsvm,
+    score_isolation_forest_set,
     score_ocsvm_set,
     score_test_set,
     score_test_set_sequence,
+    score_vae_set,
 )
 from transpetro_modelos.training.train import (
     make_dataloader,
     make_sequence_dataloader,
     train_autoencoder,
+    train_vae,
 )
 
 
@@ -60,12 +66,39 @@ def train_model(
     logger=None,
     ocsvm_nu: float = 0.05,
     ocsvm_gamma: str = "scale",
+    latent_dim: int = 8,
+    vae_beta: float = 1.0,
+    if_n_estimators: int = 100,
 ):
-    """Treina e retorna o modelo. Suporta dense, lstm e ocsvm."""
+    """Treina e retorna o modelo. Suporta dense, lstm, ocsvm, vae e isolation_forest."""
     if model_type == "ocsvm":
         return fit_ocsvm(train_df, nu=ocsvm_nu, gamma=ocsvm_gamma)
 
+    if model_type == "isolation_forest":
+        return fit_isolation_forest(train_df, n_estimators=if_n_estimators)
+
     n_features = train_df.shape[1]
+
+    if model_type == "vae":
+        model = VAE(
+            input_dim=n_features,
+            encoding_layers=list(dense_layers) if dense_layers else None,
+            latent_dim=latent_dim,
+        ).to(device)
+        train_loader = make_dataloader(train_df, batch_size=batch_size, shuffle=True, device=device)
+        val_loader = make_dataloader(val_df, batch_size=batch_size, shuffle=False, device=device)
+        return train_vae(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            patience=patience,
+            beta=vae_beta,
+            logger=logger,
+        )
+
     if model_type == "lstm":
         model = LSTMAutoencoder(
             input_dim=n_features,
@@ -79,7 +112,7 @@ def train_model(
         val_loader = make_sequence_dataloader(
             val_df, seq_len=seq_len, batch_size=batch_size, shuffle=False, device=device
         )
-    else:
+    else:  # dense
         model = DenseAutoencoder(
             input_dim=n_features,
             encoding_layers=list(dense_layers) if dense_layers else None,
@@ -119,6 +152,17 @@ def score_full(
         threshold = determine_threshold(train_errors, percentile=threshold_percentile)
         return score_ocsvm_set(model, full_df, threshold), threshold, train_errors
 
+    if model_type == "isolation_forest":
+        train_errors = compute_isolation_forest_errors(model, train_df)
+        threshold = determine_threshold(train_errors, percentile=threshold_percentile)
+        return score_isolation_forest_set(model, full_df, threshold), threshold, train_errors
+
+    if model_type == "vae":
+        train_errors = compute_vae_errors(model, train_df, device=device, batch_size=batch_size)
+        threshold = determine_threshold(train_errors, percentile=threshold_percentile)
+        scores = score_vae_set(model, full_df, threshold, device=device, batch_size=batch_size)
+        return scores, threshold, train_errors
+
     if model_type == "lstm":
         train_errors = compute_reconstruction_errors_sequence(
             model, train_df, seq_len=seq_len, batch_size=batch_size, device=device
@@ -155,6 +199,9 @@ class TrialConfig:
     lstm_num_layers: int = 2
     ocsvm_nu: float = 0.05
     ocsvm_gamma: str = "scale"
+    latent_dim: int = 8
+    vae_beta: float = 1.0
+    if_n_estimators: int = 100
 
     def label(self) -> str:
         vs = self.val_start.strftime("%Y-%m-%d") if self.val_start else "auto"
@@ -167,7 +214,13 @@ class TrialConfig:
             parts.extend([
                 f"seq{self.seq_len}", f"h{self.lstm_hidden_dim}", f"l{self.lstm_num_layers}",
             ])
-        else:
+        elif self.model == "vae":
+            parts.extend([f"lr{self.learning_rate:g}", f"b{self.batch_size}", f"latent{self.latent_dim}"])
+            if self.dense_layers:
+                parts.append("layers" + "-".join(str(v) for v in self.dense_layers))
+        elif self.model == "isolation_forest":
+            parts.append(f"nest{self.if_n_estimators}")
+        else:  # ocsvm
             parts.extend([f"nu{self.ocsvm_nu:g}", f"gamma{self.ocsvm_gamma}"])
         return "__".join(parts)
 
@@ -189,6 +242,8 @@ def build_trials(
     lstm_layers: list[int] | None = None,
     ocsvm_nus: list[float] | None = None,
     ocsvm_gammas: list[str] | None = None,
+    latent_dims: list[int] | None = None,
+    if_n_estimators_list: list[int] | None = None,
     epochs: int = 100,
     patience: int = 10,
     quick: bool = False,
@@ -215,7 +270,7 @@ def build_trials(
         _epochs, _patience = 20, 5
     else:
         _presets = presets or available_presets
-        _models = models or ["dense", "lstm", "ocsvm"]
+        _models = models or ["dense", "lstm", "ocsvm", "vae", "isolation_forest"]
         _thresholds = thresholds or [90.0, 95.0, 97.5, 99.0]
         _val_starts = val_start_dates or default_val_starts
         _dense_layers = dense_layers or [None, (64, 32, 16), (128, 64, 32)]
@@ -228,6 +283,8 @@ def build_trials(
     _lstm_layers = lstm_layers or [2]
     _ocsvm_nus = ocsvm_nus or [0.05]
     _ocsvm_gammas = ocsvm_gammas or ["scale"]
+    _latent_dims = latent_dims or [8]
+    _if_n_estimators = if_n_estimators_list or [100]
 
     trials: list[TrialConfig] = []
     for val_start, preset, model, threshold in product(_val_starts, _presets, _models, _thresholds):
@@ -253,7 +310,22 @@ def build_trials(
                     val_start=val_start, preset=preset, model=model,
                     threshold_percentile=threshold,
                     ocsvm_nu=nu, ocsvm_gamma=gamma,
+                ))
+        elif model == "vae":
+            for lr, bs, layers, ldim in product(_dense_lrs, _batch_sizes, _dense_layers, _latent_dims):
+                trials.append(TrialConfig(
+                    val_start=val_start, preset=preset, model=model,
+                    threshold_percentile=threshold,
+                    learning_rate=lr, batch_size=bs, dense_layers=layers,
+                    latent_dim=ldim,
                     epochs=_epochs, patience=_patience,
+                ))
+        elif model == "isolation_forest":
+            for n_est in _if_n_estimators:
+                trials.append(TrialConfig(
+                    val_start=val_start, preset=preset, model=model,
+                    threshold_percentile=threshold,
+                    if_n_estimators=n_est,
                 ))
         else:
             raise ValueError(f"Modelo desconhecido: {model}")
@@ -313,6 +385,9 @@ def run_trial(
         weight_decay=trial.weight_decay,
         ocsvm_nu=trial.ocsvm_nu,
         ocsvm_gamma=trial.ocsvm_gamma,
+        latent_dim=trial.latent_dim,
+        vae_beta=trial.vae_beta,
+        if_n_estimators=trial.if_n_estimators,
     )
 
     scores, threshold, train_errors = score_full(
