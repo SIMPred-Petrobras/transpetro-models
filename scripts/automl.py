@@ -1,14 +1,16 @@
 """
 AutoML para Detecção de Anomalias
 ==================================
-Modelos : Dense Autoencoder | LSTM Autoencoder | One-Class SVM
+Modelos : Dense Autoencoder | LSTM Autoencoder | One-Class SVM | Isolation Forest
 Seleção : Score composto (val_loss + anomaly_rate + threshold_ratio)
 Busca   : Grid search declarativo via build_trials()
 
 Uso rápido:
-    python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --quick
+    python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --mode quick
 Uso completo:
-    python scripts/automl_anomaly_v3.py --equipment MEQ-01 --remote --queue gpu
+    python scripts/automl_anomaly_v3.py --equipment MEQ-01 --remote --queue gpu --mode full
+Uso extensivo (1-2 dias):
+    python scripts/automl_anomaly_v3.py --equipment MEQ-01 --remote --queue gpu --mode extensive
 """
 
 import argparse
@@ -44,6 +46,9 @@ from transpetro_modelos.training.evaluate import (
     score_ocsvm_set,
     score_test_set,
     score_test_set_sequence,
+    fit_isolation_forest,
+    compute_isolation_forest_errors,
+    score_isolation_forest_set
 )
 from transpetro_modelos.training.train import (
     make_dataloader,
@@ -54,8 +59,9 @@ from transpetro_modelos.training.train import (
 
 # ── Type Aliases ───────────────────────────────────────────────────────────────
 
-ModelType = Literal["dense", "lstm", "ocsvm"]
+ModelType = Literal["dense", "lstm", "ocsvm", "iforest"]
 PresetName = str
+ModeType = Literal["quick", "full", "extensive"]
 
 
 # ── TrialConfig ────────────────────────────────────────────────────────────────
@@ -65,10 +71,11 @@ class TrialConfig:
     """
     Configuração imutável de um trial de AutoML.
 
-    Suporta três tipos de modelo:
+    Suporta quatro tipos de modelo:
     - dense: Autoencoder denso com camadas customizáveis
     - lstm: Autoencoder sequencial para séries temporais
     - ocsvm: One-Class SVM para detecção de outliers
+    - iforest: Isolation Forest para detecção de outliers
     """
     val_start: datetime | None  # None = usa val_fraction=0.2 do temporal_split
     preset: str
@@ -82,6 +89,7 @@ class TrialConfig:
     epochs: int = 100
     patience: int = 10
     dense_layers: tuple[int, ...] | None = None
+    dropout: float = 0.0
 
     # LSTM hyperparameters
     seq_len: int = 24
@@ -90,12 +98,16 @@ class TrialConfig:
 
     # OCSVM hyperparameters
     ocsvm_nu: float = 0.05
-    ocsvm_gamma: str = "scale"
+    ocsvm_gamma: str | float = "scale"
+
+    # Isolation Forest hyperparameters
+    iforest_contamination: float = 0.05
+    iforest_n_estimators: int = 100
 
     def __post_init__(self):
         """Valida configuração após inicialização."""
-        if self.model not in {"dense", "lstm", "ocsvm"}:
-            raise ValueError(f"Modelo inválido: {self.model}. Use: dense, lstm ou ocsvm")
+        if self.model not in {"dense", "lstm", "ocsvm", "iforest"}:
+            raise ValueError(f"Modelo inválido: {self.model}. Use: dense, lstm, ocsvm ou iforest")
 
         if not 0 < self.threshold_percentile <= 100:
             raise ValueError(
@@ -112,6 +124,9 @@ class TrialConfig:
         if self.epochs < 1:
             raise ValueError(f"epochs deve ser >= 1, recebido: {self.epochs}")
 
+        if not 0 <= self.dropout < 1:
+            raise ValueError(f"dropout deve estar entre 0 e 1, recebido: {self.dropout}")
+
     def label(self) -> str:
         """Gera identificador único e legível para o trial."""
         vs = self.val_start.strftime("%Y-%m-%d") if self.val_start else "auto"
@@ -122,14 +137,29 @@ class TrialConfig:
             if self.dense_layers:
                 layers_str = "-".join(str(d) for d in self.dense_layers)
                 parts.append(f"arch_{layers_str}")
+            if self.dropout > 0:
+                parts.append(f"drop{self.dropout:g}")
+            if self.weight_decay != 1e-5:
+                parts.append(f"wd{self.weight_decay:g}")
+
         elif self.model == "lstm":
             parts.extend([
                 f"seq{self.seq_len}",
                 f"hid{self.lstm_hidden_dim}",
                 f"lay{self.lstm_num_layers}",
             ])
+            if self.dropout > 0:
+                parts.append(f"drop{self.dropout:g}")
+
+        elif self.model == "iforest":
+            parts.extend([
+                f"cont{self.iforest_contamination:g}",
+                f"trees{self.iforest_n_estimators}"
+            ])
+
         else:  # ocsvm
-            parts.extend([f"nu{self.ocsvm_nu:g}", f"gamma_{self.ocsvm_gamma}"])
+            gamma_str = f"{self.ocsvm_gamma:g}" if isinstance(self.ocsvm_gamma, float) else self.ocsvm_gamma
+            parts.extend([f"nu{self.ocsvm_nu:g}", f"gamma_{gamma_str}"])
 
         return "__".join(parts)
 
@@ -142,6 +172,7 @@ class TrialConfig:
             if self.dense_layers is not None
             else "auto"
         )
+        d["ocsvm_gamma"] = str(self.ocsvm_gamma)
         return d
 
 
@@ -162,18 +193,29 @@ def train_model(
     patience: int = 10,
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-5,
+    dropout: float = 0.0,
     logger=None,
     ocsvm_nu: float = 0.05,
-    ocsvm_gamma: str = "scale",
+    ocsvm_gamma: str | float = "scale",
+    iforest_contamination: float = 0.05,
+    iforest_n_estimators: int = 100
 ) -> tuple[Any, float]:
     """
     Treina qualquer modelo suportado e retorna (model, val_loss).
 
     Função standalone reutilizável fora do contexto de AutoML.
-    Para OCSVM, val_loss = 0.0.
+    Para OCSVM e IForest, val_loss = 0.0.
     """
     if model_type == "ocsvm":
         clf = fit_ocsvm(train_df, nu=ocsvm_nu, gamma=ocsvm_gamma)
+        return clf, 0.0
+
+    if model_type == "iforest":
+        clf = fit_isolation_forest(
+            train_df,
+            contamination=iforest_contamination,
+            n_estimators=iforest_n_estimators,
+        )
         return clf, 0.0
 
     n_features = train_df.shape[1]
@@ -240,6 +282,12 @@ def score_full(
         - threshold: Valor do threshold calculado
         - train_errors: Array de erros no conjunto de treino
     """
+    if model_type == "iforest":
+        train_errors = compute_isolation_forest_errors(model, train_df)
+        threshold = determine_threshold(train_errors, percentile=threshold_percentile)
+        scores_df = score_isolation_forest_set(model, full_df, threshold)
+        return scores_df, threshold, train_errors
+    
     if model_type == "ocsvm":
         train_errors = compute_ocsvm_errors(model, train_df)
         threshold = determine_threshold(train_errors, percentile=threshold_percentile)
@@ -277,6 +325,7 @@ def score_full(
 def build_trials(
     equipment_id: str,
     *,
+    mode: ModeType = "full",
     models: list[ModelType] | None = None,
     presets: list[PresetName] | None = None,
     thresholds: list[float] | None = None,
@@ -284,35 +333,42 @@ def build_trials(
     dense_layers: list[tuple[int, ...] | None] | None = None,
     dense_lrs: list[float] | None = None,
     batch_sizes: list[int] | None = None,
+    weight_decays: list[float] | None = None,
+    dropouts: list[float] | None = None,
     seq_lens: list[int] | None = None,
     lstm_hidden_dims: list[int] | None = None,
     lstm_num_layers: list[int] | None = None,
     ocsvm_nus: list[float] | None = None,
-    ocsvm_gammas: list[str] | None = None,
-    epochs: int = 100,
-    patience: int = 10,
-    quick: bool = False,
+    ocsvm_gammas: list[str | float] | None = None,
+    iforest_contaminations: list[float] | None = None,
+    iforest_n_estimators: list[int] | None = None,
+    epochs: int = 200,
+    patience: int = 20,
 ) -> list[TrialConfig]:
     """
     Gera a grade de TrialConfig para um equipamento.
 
     Args:
         equipment_id: ID do equipamento em EQUIPMENT_CONFIGS
+        mode: Modo de execução ('quick', 'full', 'extensive')
         models: Lista de modelos a incluir (default: todos)
         presets: Lista de presets de preprocessing (default: todos disponíveis)
-        thresholds: Percentis de threshold (default: depende do modo quick)
+        thresholds: Percentis de threshold (default: depende do modo)
         val_start_dates: Datas de início da validação (default: valor da config ou None)
         dense_layers: Arquiteturas de camadas densas
         dense_lrs: Learning rates para modelos densos
         batch_sizes: Tamanhos de batch
+        weight_decays: Valores de weight decay
+        dropouts: Valores de dropout
         seq_lens: Comprimentos de sequência para LSTM
         lstm_hidden_dims: Dimensões hidden do LSTM
         lstm_num_layers: Número de camadas LSTM
         ocsvm_nus: Parâmetro nu do OCSVM
         ocsvm_gammas: Parâmetro gamma do OCSVM
+        iforest_contaminations: Parâmetro contamination do Isolation Forest
+        iforest_n_estimators: Número de árvores do Isolation Forest
         epochs: Número de epochs de treino
         patience: Early stopping patience
-        quick: Se True, usa grade reduzida para validação rápida
 
     Returns:
         Lista de TrialConfig prontos para execução
@@ -327,40 +383,103 @@ def build_trials(
         [config.val_start_date] if getattr(config, "val_start_date", None) else [None]
     )
 
-    if quick:
-        _models = models or ["dense", "ocsvm"]
+    if mode == "quick":
+        # Grade mínima para validação rápida (5-30 min)
+        _models = models or ["dense", "ocsvm", "iforest"]
         _presets = presets or available_presets[:1]
         _thresholds = thresholds or [95.0]
         _val_starts = val_start_dates or default_val_starts
         _layers = dense_layers or [None]
         _lrs = dense_lrs or [1e-3]
         _batches = batch_sizes or [256]
+        _weight_decays = weight_decays or [1e-5]
+        _dropouts = dropouts or [0.0]
         _seq_lens = seq_lens or [24]
         _hidden = lstm_hidden_dims or [64]
         _nlayers = lstm_num_layers or [2]
         _nus = ocsvm_nus or [0.05]
         _gammas = ocsvm_gammas or ["scale"]
+        _iforest_conts = iforest_contaminations or [0.05]
+        _iforest_trees = iforest_n_estimators or [100]
         _epochs, _patience = 20, 5
-    else:
-        _models = models or ["dense", "lstm", "ocsvm"]
+
+    elif mode == "extensive":
+        # Grade massiva para exploração profunda (1-2 dias)
+        _models = models or ["dense", "lstm", "ocsvm", "iforest"]
+        _presets = presets or available_presets
+        _thresholds = thresholds or [85.0, 90.0, 92.5, 95.0, 97.5, 99.0, 99.5]
+        _val_starts = val_start_dates or default_val_starts
+        
+        # Dense: exploração massiva de arquiteturas
+        _layers = dense_layers or [
+            None,  # Auto
+            (32,), (64,), (128,), (256,),
+            (64, 32), (128, 64), (256, 128),
+            (64, 32, 16), (128, 64, 32), (256, 128, 64),
+            (128, 64, 32, 16), (256, 128, 64, 32),
+            (512, 256, 128),
+        ]
+        _lrs = dense_lrs or [1e-2, 5e-3, 1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
+        _batches = batch_sizes or [64, 128, 256, 512, 1024]
+        _weight_decays = weight_decays or [0, 1e-6, 1e-5, 1e-4, 1e-3]
+        _dropouts = dropouts or [0.0, 0.1, 0.2, 0.3, 0.4]
+        
+        # LSTM: exploração massiva de configurações
+        _seq_lens = seq_lens or [6, 12, 18, 24, 36, 48, 72, 96]
+        _hidden = lstm_hidden_dims or [16, 32, 64, 96, 128, 192, 256]
+        _nlayers = lstm_num_layers or [1, 2, 3, 4]
+        
+        # OCSVM: exploração granular
+        _nus = ocsvm_nus or [0.0001, 0.0003, 0.001, 0.003, 0.005, 0.007, 0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.25]
+        _gammas = ocsvm_gammas or ["scale", "auto", 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1, 10]
+        
+        # IForest: exploração granular
+        _iforest_conts = iforest_contaminations or [0.0001, 0.0005, 0.001, 0.003, 0.005, 0.01, 0.03, 0.05, 0.1, 0.15]
+        _iforest_trees = iforest_n_estimators or [50, 100, 200, 300, 500, 1000]
+        
+        _epochs, _patience = epochs * 2, patience * 2
+
+    else:  # full (modo padrão, 4-8h)
+        _models = models or ["dense", "lstm", "ocsvm", "iforest"]
         _presets = presets or available_presets
         _thresholds = thresholds or [90.0, 95.0, 97.5, 99.0]
         _val_starts = val_start_dates or default_val_starts
-        _layers = dense_layers or [None, (64, 32, 16), (128, 64, 32)]
-        _lrs = dense_lrs or [1e-3, 5e-4]
-        _batches = batch_sizes or [256, 512]
-        _seq_lens = seq_lens or [12, 24]
-        _hidden = lstm_hidden_dims or [64]
-        _nlayers = lstm_num_layers or [2]
-        _nus = ocsvm_nus or [0.01, 0.05, 0.1]
-        _gammas = ocsvm_gammas or ["scale", "auto"]
+        
+        # Dense: configurações balanceadas
+        _layers = dense_layers or [
+            None,  # Auto
+            (64, 32, 16),
+            (128, 64, 32),
+            (256, 128, 64),
+            (128, 64, 32, 16),
+            (64, 32),
+            (32, 16, 8),
+        ]
+        _lrs = dense_lrs or [1e-3, 5e-4, 1e-4, 5e-5]
+        _batches = batch_sizes or [128, 256, 512]
+        _weight_decays = weight_decays or [0, 1e-5, 1e-4]
+        _dropouts = dropouts or [0.0, 0.1, 0.2]
+        
+        # LSTM: configurações balanceadas
+        _seq_lens = seq_lens or [12, 24, 48, 72]
+        _hidden = lstm_hidden_dims or [32, 64, 128]
+        _nlayers = lstm_num_layers or [1, 2, 3]
+        
+        # OCSVM: configurações balanceadas
+        _nus = ocsvm_nus or [0.001, 0.005, 0.01, 0.05, 0.1, 0.15]
+        _gammas = ocsvm_gammas or ["scale", "auto", 0.001, 0.01]
+        
+        # IForest: configurações balanceadas
+        _iforest_conts = iforest_contaminations or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _iforest_trees = iforest_n_estimators or [100, 200, 300, 500]
+        
         _epochs, _patience = epochs, patience
 
     trials: list[TrialConfig] = []
 
     for val_start, preset, model, threshold in product(_val_starts, _presets, _models, _thresholds):
         if model == "dense":
-            for lr, bs, layers in product(_lrs, _batches, _layers):
+            for lr, bs, layers, wd, drop in product(_lrs, _batches, _layers, _weight_decays, _dropouts):
                 trials.append(TrialConfig(
                     val_start=val_start,
                     preset=preset,
@@ -369,12 +488,14 @@ def build_trials(
                     learning_rate=lr,
                     batch_size=bs,
                     dense_layers=layers,
+                    weight_decay=wd,
+                    dropout=drop,
                     epochs=_epochs,
                     patience=_patience,
                 ))
 
         elif model == "lstm":
-            for sl, hd, nl in product(_seq_lens, _hidden, _nlayers):
+            for sl, hd, nl, drop in product(_seq_lens, _hidden, _nlayers, _dropouts):
                 trials.append(TrialConfig(
                     val_start=val_start,
                     preset=preset,
@@ -383,6 +504,7 @@ def build_trials(
                     seq_len=sl,
                     lstm_hidden_dim=hd,
                     lstm_num_layers=nl,
+                    dropout=drop,
                     epochs=_epochs,
                     patience=_patience,
                 ))
@@ -398,6 +520,17 @@ def build_trials(
                     ocsvm_gamma=gamma,
                 ))
 
+        elif model == "iforest":
+            for cont, trees in product(_iforest_conts, _iforest_trees):
+                trials.append(TrialConfig(
+                    val_start=val_start,
+                    preset=preset,
+                    model=model,
+                    threshold_percentile=threshold,
+                    iforest_contamination=cont,
+                    iforest_n_estimators=trees,
+                ))
+                
         else:
             raise ValueError(f"Modelo desconhecido: {model}")
 
@@ -478,8 +611,11 @@ def run_trial(
         patience=trial.patience,
         learning_rate=trial.learning_rate,
         weight_decay=trial.weight_decay,
+        dropout=trial.dropout,
         ocsvm_nu=trial.ocsvm_nu,
         ocsvm_gamma=trial.ocsvm_gamma,
+        iforest_contamination=trial.iforest_contamination,
+        iforest_n_estimators=trial.iforest_n_estimators,    
         logger=logger,
     )
 
@@ -612,6 +748,7 @@ def print_trial_result(result: dict[str, Any], indent: str = "  ") -> None:
 
 def print_final_summary(
     equipment_id: str,
+    mode: ModeType,
     n_total_trials: int,
     n_successful: int,
     n_failed: int,
@@ -624,10 +761,11 @@ def print_final_summary(
     print(f"{'RESUMO FINAL':^70}")
     print("=" * 70)
     print(f"Equipamento: {equipment_id}")
+    print(f"Modo: {mode}")
     print(f"Trials executados: {n_successful}/{n_total_trials} bem-sucedidos")
     print(f"Falhas: {n_failed}")
     print(f"Pulados: {n_skipped}")
-    print(f"Duração: {duration_seconds / 60:.1f} min")
+    print(f"Duração: {duration_seconds / 60:.1f} min ({duration_seconds / 3600:.1f} h)")
     print()
     print("MELHOR CONFIGURAÇÃO:")
     print(f"Modelo: {best_result['model']}")
@@ -715,7 +853,7 @@ def save_artifacts(
     model = best_row["_model"]
     model_type = best_row["model"]
 
-    if model_type == "ocsvm":
+    if model_type in ["ocsvm", "iforest"]:
         model_path = output_dir / f"best_model_{equipment_id}.pkl"
         with model_path.open("wb") as f:
             pickle.dump(model, f)
@@ -762,15 +900,15 @@ def save_artifacts(
 
 def main(
     equipment_id: str,
+    mode: ModeType = "full",
     remote: bool = False,
     local_data: bool = False,
     queue: str = "default",
     upload_to_clearml: bool = True,
     local_artifacts_dir: str = "artifacts_local",
     models: list[str] | None = None,
-    quick: bool = False,
-    epochs: int = 100,
-    patience: int = 10,
+    epochs: int = 200,
+    patience: int = 20,
     prefailure_days: int = 30,
     normal_end_days: int = 60,
 ) -> None:
@@ -796,15 +934,14 @@ def main(
     print(f"{'AUTOML - DETECÇÃO DE ANOMALIAS':^70}")
     print("=" * 70)
     print(f"Equipamento: {equipment_id}")
-    print(f"Quick      : {quick}")
+    print(f"Modo       : {mode}")
     print(f"Remote     : {remote}")
     print("=" * 70 + "\n")
 
     Task.add_requirements("pyarrow")
     Task.add_requirements("torch", package_version="")
 
-    speed_suffix = "quick" if quick else "full"
-    task_name = f"automl_{equipment_id}_{speed_suffix}"
+    task_name = f"automl_{equipment_id}_{mode}"
 
     task = Task.init(
         project_name="Transpetro",
@@ -815,8 +952,8 @@ def main(
 
     hparams = {
         "equipment_id": equipment_id,
-        "models": models or ["dense", "lstm", "ocsvm"],
-        "quick": quick,
+        "mode": mode,
+        "models": models or ["dense", "lstm", "ocsvm", "iforest"],
         "epochs": epochs,
         "patience": patience,
         "prefailure_days": prefailure_days,
@@ -860,10 +997,10 @@ def main(
     print("\nETAPA 3: Gerando grid de trials...")
     trials = build_trials(
         equipment_id=equipment_id,
+        mode=mode,
         models=hparams["models"],
         epochs=epochs,
         patience=patience,
-        quick=quick,
     )
     print(f"  Total de trials: {len(trials)}")
 
@@ -873,6 +1010,15 @@ def main(
 
     for model_type, count in sorted(model_counts.items()):
         print(f"    {model_type:8s}: {count:4d} trials")
+
+    # Estimativa de tempo
+    if mode == "quick":
+        est_time = "5-30 minutos"
+    elif mode == "extensive":
+        est_time = "1-2 dias"
+    else:
+        est_time = "4-8 horas"
+    print(f"\n  Tempo estimado: {est_time}")
 
     # ══════════════════════════════════════════════════════════════
     # ETAPA 4: EXECUTION
@@ -963,6 +1109,7 @@ def main(
 
     print_final_summary(
         equipment_id=equipment_id,
+        mode=mode,
         n_total_trials=len(trials),
         n_successful=n_successful,
         n_failed=n_failed,
@@ -985,17 +1132,17 @@ if __name__ == "__main__":
         epilog="""
 Exemplos de uso:
 
-  # Teste rápido local
-  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --quick
+  # Teste rápido local (5-30 min)
+  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --mode quick
 
-  # Execução completa local
-  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data
+  # Execução completa local (4-8h)
+  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --mode full
 
-  # Execução remota no ClearML
-  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --remote --queue gpu
+  # Execução extensiva remota (1-2 dias)
+  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --remote --queue gpu --mode extensive
 
   # Custom: apenas Dense e OCSVM
-  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --models dense ocsvm
+  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --models dense ocsvm --mode full
         """,
     )
 
@@ -1004,6 +1151,12 @@ Exemplos de uso:
         required=True,
         choices=list(EQUIPMENT_CONFIGS.keys()),
         help="ID do equipamento a treinar",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["quick", "full", "extensive"],
+        default="full",
+        help="Modo de execução: quick (5-30min), full (4-8h), extensive (1-2 dias)",
     )
     parser.add_argument(
         "--remote",
@@ -1034,25 +1187,20 @@ Exemplos de uso:
         "--models",
         nargs="+",
         default=None,
-        choices=["dense", "lstm", "ocsvm"],
+        choices=["dense", "lstm", "ocsvm", "iforest"],
         help="Modelos a incluir (padrão: todos)",
-    )
-    parser.add_argument(
-        "--quick",
-        action="store_true",
-        help="Grade reduzida: 20 epochs, 1 preset, 1 threshold — para validar rápido",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=100,
-        help="Número de epochs de treino (default: 100)",
+        default=200,
+        help="Número de epochs de treino (default: 200)",
     )
     parser.add_argument(
         "--patience",
         type=int,
-        default=10,
-        help="Early stopping patience (default: 10)",
+        default=20,
+        help="Early stopping patience (default: 20)",
     )
     parser.add_argument(
         "--prefailure-days",
@@ -1071,13 +1219,13 @@ Exemplos de uso:
 
     main(
         equipment_id=args.equipment,
+        mode=args.mode,
         remote=args.remote,
         local_data=args.local_data,
         queue=args.queue,
         upload_to_clearml=not args.no_clearml_upload,
         local_artifacts_dir=args.local_artifacts_dir,
         models=args.models,
-        quick=args.quick,
         epochs=args.epochs,
         patience=args.patience,
         prefailure_days=args.prefailure_days,

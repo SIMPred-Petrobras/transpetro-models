@@ -26,6 +26,9 @@ from transpetro_modelos.training.evaluate import (
     score_ocsvm_set,
     score_test_set,
     score_test_set_sequence,
+    fit_isolation_forest,
+    compute_isolation_forest_errors,
+    score_isolation_forest_set
 )
 
 def _sensor_slug(sensor_name: str) -> str:
@@ -154,19 +157,28 @@ def main(
     threshold_percentile: float = 95.0,
     ocsvm_nu: float = 0.05,
     epochs: int = 200,
-    patience: int = 20
+    patience: int = 20,
+    iforest_contamination: float = 0.05,
+    iforest_n_estimators: int = 100
 ) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
     base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
 
     Task.add_requirements("pyarrow")
     Task.add_requirements("torch", package_version="")
-    model_suffix = "" if model_type == "dense" else f"-{model_type}"
+    model_name_prefix = {
+        "dense": "autoencoder",
+        "lstm": "autoencoder",
+        "ocsvm": "ocsvm",
+        "iforest": "isolation-forest"
+    }.get(model_type, model_type)
+
     task_suffix = "" if preprocess_preset == "baseline" else f"-{preprocess_preset}"
+
     task_name = (
-        f"autoencoder-{equipment_id}-per-sensor{task_suffix}{model_suffix}"
+        f"{model_name_prefix}-{equipment_id}-per-sensor{task_suffix}"
         if per_sensor
-        else f"autoencoder-{equipment_id}{task_suffix}{model_suffix}"
+        else f"{model_name_prefix}-{equipment_id}{task_suffix}"
     )
     task = Task.init(
         project_name="Transpetro",
@@ -197,6 +209,8 @@ def main(
         "model_type": model_type,
         "seq_len": seq_len,
         "ocsvm_nu": ocsvm_nu,
+        "isolation_contamination": iforest_contamination,
+        "isolation_n_estimators": iforest_n_estimators,
     }
     task.connect(hparams)
 
@@ -288,6 +302,16 @@ def main(
                 full_df = pd.concat([train_df, val_df, test_df]).sort_index()
                 test_scores = score_ocsvm_set(model, test_df, threshold)
                 full_scores = score_ocsvm_set(model, full_df, threshold)
+
+            elif hparams["model_type"] == "iforest":
+                model = fit_isolation_forest(train_df, contamination=hparams["isolation_contamination"])
+                train_errors = compute_isolation_forest_errors(model, train_df)
+                test_errors = compute_isolation_forest_errors(model, test_df)
+                threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
+                full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+                test_scores = score_isolation_forest_set(model, test_df, threshold)
+                full_scores = score_isolation_forest_set(model, full_df, threshold)
+
             else:
                 model, train_loader, val_loader = _build_model_and_loaders(
                     n_features, encoding_layers, train_df, val_df, hparams, device
@@ -338,7 +362,7 @@ def main(
                 "preprocessing_artifacts": _artifacts_presence(artifacts),
             }
 
-            if hparams["model_type"] == "ocsvm":
+            if hparams["model_type"] in ["ocsvm", "iforest"]:
                 _publish_artifact(
                     task,
                     f"model_file__{slug}",
@@ -459,6 +483,13 @@ def main(
         threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
         scores_df = score_ocsvm_set(model, test_df, threshold)
 
+    elif hparams["model_type"] == "iforest":
+        model = fit_isolation_forest(train_df, contamination=hparams["isolation_contamination"])
+        train_errors = compute_isolation_forest_errors(model, train_df)
+        test_errors = compute_isolation_forest_errors(model, test_df)
+        threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
+        scores_df = score_isolation_forest_set(model, test_df, threshold)
+
     else:
         model, train_loader, val_loader = _build_model_and_loaders(
             n_features, encoding_layers, train_df, val_df, hparams, device
@@ -488,7 +519,7 @@ def main(
     logger.report_scalar("rows", "val_after_preprocessing", val_report.rows_after, 0)
     logger.report_scalar("rows", "test_after_preprocessing", test_report.rows_after, 0)
 
-    if hparams["model_type"] == "ocsvm":
+    if hparams["model_type"] in ["ocsvm", "iforest"]:
         _publish_artifact(
             task,
             "model_file",
@@ -570,6 +601,10 @@ def main(
     full_df = pd.concat([train_df, val_df, test_df]).sort_index()
     if hparams["model_type"] == "ocsvm":
         full_scores = score_ocsvm_set(model, full_df, threshold)
+
+    elif hparams["model_type"] == "iforest":
+        full_scores = score_isolation_forest_set(model, full_df, threshold)
+
     else:
         full_scores = _score_df(model, full_df, threshold, hparams, device)
     _publish_artifact(
@@ -612,8 +647,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         default="dense",
-        choices=["dense", "lstm", "ocsvm", "autokeras"],
-        help="Modelo: dense (padrao), lstm, ocsvm ou autokeras",
+        choices=["dense", "lstm", "ocsvm", "iforest"],
+        help="Modelo: dense (padrao), lstm, ocsvm ou isolation forest (iforest)",
     )
     parser.add_argument(
         "--ocsvm-nu",
@@ -645,6 +680,18 @@ if __name__ == "__main__":
         default=20,
         help="Patience para early stopping (default: 20)",
     )
+    parser.add_argument(
+        "--iforest-contamination",
+        type=float,
+        default=0.05,
+        help="Contamination do Isolation Forest",
+    )
+    parser.add_argument(
+        "--iforest-n-estimators",
+        type=int,
+        default=100,
+        help="Numero de estimadores do Isolation Forest",
+    )
     args = parser.parse_args()
     main(
         args.equipment,
@@ -660,5 +707,7 @@ if __name__ == "__main__":
         threshold_percentile=args.threshold_percentile,
         ocsvm_nu=args.ocsvm_nu,
         epochs=args.epochs,
-        patience=args.patience
+        patience=args.patience,
+        iforest_contamination=args.iforest_contamination,
+        iforest_n_estimators=args.iforest_n_estimators
     )

@@ -4,6 +4,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
+from sklearn.ensemble import IsolationForest
 
 from transpetro_modelos.training.train import make_windows
 
@@ -26,6 +27,50 @@ def score_ocsvm_set(clf, df: pd.DataFrame, threshold: float) -> pd.DataFrame:
         {"reconstruction_error": errors, "is_anomaly": errors > threshold},
         index=df.index,
     )
+
+from sklearn.ensemble import IsolationForest
+
+
+def fit_isolation_forest(
+    train_df,
+    contamination=0.05,
+    n_estimators=100,
+    random_state=42,
+):
+    model = IsolationForest(
+        contamination=contamination,
+        n_estimators=n_estimators,
+        random_state=random_state,
+    )
+
+    model.fit(train_df)
+
+    return model
+
+def compute_isolation_forest_errors(model, df: pd.DataFrame):
+    """
+    Retorna anomaly score positivo.
+    Quanto MAIOR o valor, mais anômalo.
+    """
+
+    scores = -model.score_samples(df)
+
+    return np.asarray(scores)
+
+
+def score_isolation_forest_set(
+    model,
+    df: pd.DataFrame,
+    threshold: float,
+):
+    scores = compute_isolation_forest_errors(model, df)
+
+    result = pd.DataFrame(index=df.index)
+
+    result["reconstruction_error"] = scores
+    result["is_anomaly"] = scores > threshold
+
+    return result
 
 def compute_reconstruction_errors_sequence(
     model: torch.nn.Module,
