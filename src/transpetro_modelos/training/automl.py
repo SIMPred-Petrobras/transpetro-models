@@ -24,6 +24,7 @@ from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder, VAE
 from transpetro_modelos.training.evaluate import (
     compute_isolation_forest_errors,
+    compute_lof_errors,
     compute_ocsvm_errors,
     compute_reconstruction_errors,
     compute_reconstruction_errors_sequence,
@@ -31,8 +32,10 @@ from transpetro_modelos.training.evaluate import (
     determine_threshold,
     failure_detection_metrics,
     fit_isolation_forest,
+    fit_lof,
     fit_ocsvm,
     score_isolation_forest_set,
+    score_lof_set,
     score_ocsvm_set,
     score_test_set,
     score_test_set_sequence,
@@ -69,13 +72,19 @@ def train_model(
     latent_dim: int = 8,
     vae_beta: float = 1.0,
     if_n_estimators: int = 100,
+    if_contamination: float = 0.05,
+    lof_n_neighbors: int = 20,
+    lof_contamination: float = 0.05,
 ):
-    """Treina e retorna o modelo. Suporta dense, lstm, ocsvm, vae e isolation_forest."""
+    """Treina e retorna o modelo. Suporta dense, lstm, ocsvm, vae, isolation_forest e lof."""
     if model_type == "ocsvm":
         return fit_ocsvm(train_df, nu=ocsvm_nu, gamma=ocsvm_gamma)
 
     if model_type == "isolation_forest":
-        return fit_isolation_forest(train_df, n_estimators=if_n_estimators)
+        return fit_isolation_forest(train_df, n_estimators=if_n_estimators, contamination=if_contamination)
+
+    if model_type == "lof":
+        return fit_lof(train_df, n_neighbors=lof_n_neighbors, contamination=lof_contamination)
 
     n_features = train_df.shape[1]
 
@@ -157,6 +166,11 @@ def score_full(
         threshold = determine_threshold(train_errors, percentile=threshold_percentile)
         return score_isolation_forest_set(model, full_df, threshold), threshold, train_errors
 
+    if model_type == "lof":
+        train_errors = compute_lof_errors(model, train_df)
+        threshold = determine_threshold(train_errors, percentile=threshold_percentile)
+        return score_lof_set(model, full_df, threshold), threshold, train_errors
+
     if model_type == "vae":
         train_errors = compute_vae_errors(model, train_df, device=device, batch_size=batch_size)
         threshold = determine_threshold(train_errors, percentile=threshold_percentile)
@@ -202,6 +216,9 @@ class TrialConfig:
     latent_dim: int = 8
     vae_beta: float = 1.0
     if_n_estimators: int = 100
+    if_contamination: float = 0.05
+    lof_n_neighbors: int = 20
+    lof_contamination: float = 0.05
 
     def label(self) -> str:
         vs = self.val_start.strftime("%Y-%m-%d") if self.val_start else "auto"
@@ -219,7 +236,9 @@ class TrialConfig:
             if self.dense_layers:
                 parts.append("layers" + "-".join(str(v) for v in self.dense_layers))
         elif self.model == "isolation_forest":
-            parts.append(f"nest{self.if_n_estimators}")
+            parts.extend([f"nest{self.if_n_estimators}", f"cont{self.if_contamination:g}"])
+        elif self.model == "lof":
+            parts.extend([f"k{self.lof_n_neighbors}", f"cont{self.lof_contamination:g}"])
         else:  # ocsvm
             parts.extend([f"nu{self.ocsvm_nu:g}", f"gamma{self.ocsvm_gamma}"])
         return "__".join(parts)
@@ -244,15 +263,23 @@ def build_trials(
     ocsvm_gammas: list[str] | None = None,
     latent_dims: list[int] | None = None,
     if_n_estimators_list: list[int] | None = None,
+    if_contamination_list: list[float] | None = None,
+    lof_n_neighbors_list: list[int] | None = None,
+    lof_contamination_list: list[float] | None = None,
     epochs: int = 100,
     patience: int = 10,
     quick: bool = False,
+    mode: str = "full",
 ) -> list[TrialConfig]:
     """
     Gera a grade de trials para um equipamento.
 
-    Se `presets` não fornecido, auto-detecta via config.preprocess_presets
-    (equipamentos sem presets usam apenas ["baseline"]).
+    mode:
+      quick     — smoke test (5-30 min): poucos modelos, epochs=20
+      full      — busca balanceada (~1 dia): todos os modelos, grade razoável
+      extensive — exploração profunda (~2 dias): grade densa em todos os eixos
+
+    Se `presets` não fornecido, auto-detecta via config.preprocess_presets.
     Se `val_start_dates` não fornecido, usa config.val_start_date ou None.
     """
     config = EQUIPMENT_CONFIGS[equipment_id]
@@ -261,30 +288,69 @@ def build_trials(
         [config.val_start_date] if config.val_start_date else [None]
     )
 
+    # --mode quick sobrescreve o flag legado --quick
     if quick:
-        _presets = presets or available_presets[:2]
-        _models = models or ["dense", "ocsvm"]
-        _thresholds = thresholds or [95.0, 99.0]
-        _val_starts = val_start_dates or default_val_starts
-        _dense_layers = dense_layers or [None]
-        _epochs, _patience = 20, 5
-    else:
-        _presets = presets or available_presets
-        _models = models or ["dense", "lstm", "ocsvm", "vae", "isolation_forest"]
-        _thresholds = thresholds or [90.0, 95.0, 97.5, 99.0]
-        _val_starts = val_start_dates or default_val_starts
-        _dense_layers = dense_layers or [None, (64, 32, 16), (128, 64, 32)]
-        _epochs, _patience = epochs, patience
+        mode = "quick"
 
-    _dense_lrs = dense_lrs or [1e-3]
-    _batch_sizes = batch_sizes or [256]
-    _seq_lens = seq_lens or [24]
-    _lstm_hidden_dims = lstm_hidden_dims or [64]
-    _lstm_layers = lstm_layers or [2]
-    _ocsvm_nus = ocsvm_nus or [0.05]
-    _ocsvm_gammas = ocsvm_gammas or ["scale"]
-    _latent_dims = latent_dims or [8]
-    _if_n_estimators = if_n_estimators_list or [100]
+    if mode == "quick":
+        _presets       = presets       or available_presets[:1]
+        _models        = models        or ["dense", "ocsvm", "isolation_forest", "lof"]
+        _thresholds    = thresholds    or [95.0, 99.0]
+        _val_starts    = val_start_dates or default_val_starts
+        _dense_layers  = dense_layers  or [None]
+        _dense_lrs     = dense_lrs     or [1e-3]
+        _batch_sizes   = batch_sizes   or [256]
+        _seq_lens      = seq_lens      or [24]
+        _lstm_hidden_dims = lstm_hidden_dims or [64]
+        _lstm_layers   = lstm_layers   or [2]
+        _ocsvm_nus     = ocsvm_nus     or [0.05]
+        _ocsvm_gammas  = ocsvm_gammas  or ["scale"]
+        _latent_dims   = latent_dims   or [8]
+        _if_n_estimators   = if_n_estimators_list   or [100]
+        _if_contaminations = if_contamination_list  or [0.05]
+        _lof_n_neighbors   = lof_n_neighbors_list   or [20]
+        _lof_contaminations = lof_contamination_list or [0.05]
+        _epochs, _patience = 20, 5
+
+    elif mode == "extensive":
+        _presets       = presets       or available_presets
+        _models        = models        or ["dense", "lstm", "ocsvm", "vae", "isolation_forest", "lof"]
+        _thresholds    = thresholds    or [90.0, 92.5, 95.0, 97.5, 99.0]
+        _val_starts    = val_start_dates or default_val_starts
+        _dense_layers  = dense_layers  or [None, (32,), (64, 32), (64, 32, 16), (128, 64, 32), (256, 128, 64), (128, 64, 32, 16)]
+        _dense_lrs     = dense_lrs     or [1e-3, 5e-4, 1e-4, 5e-5]
+        _batch_sizes   = batch_sizes   or [64, 128, 256, 512]
+        _seq_lens      = seq_lens      or [12, 24, 48, 72, 96]
+        _lstm_hidden_dims = lstm_hidden_dims or [32, 64, 128, 256]
+        _lstm_layers   = lstm_layers   or [1, 2, 3]
+        _ocsvm_nus     = ocsvm_nus     or [0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2]
+        _ocsvm_gammas  = ocsvm_gammas  or ["scale", "auto", "0.001", "0.01", "0.1"]
+        _latent_dims   = latent_dims   or [4, 8, 16, 32]
+        _if_n_estimators   = if_n_estimators_list   or [100, 200, 300, 500]
+        _if_contaminations = if_contamination_list  or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _lof_n_neighbors   = lof_n_neighbors_list   or [10, 20, 50, 100]
+        _lof_contaminations = lof_contamination_list or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _epochs, _patience = epochs * 2, patience * 2
+
+    else:  # full (default, ~1 dia)
+        _presets       = presets       or available_presets
+        _models        = models        or ["dense", "lstm", "ocsvm", "vae", "isolation_forest", "lof"]
+        _thresholds    = thresholds    or [90.0, 95.0, 97.5, 99.0]
+        _val_starts    = val_start_dates or default_val_starts
+        _dense_layers  = dense_layers  or [None, (64, 32, 16), (128, 64, 32), (256, 128, 64), (128, 64, 32, 16), (64, 32)]
+        _dense_lrs     = dense_lrs     or [1e-3, 5e-4, 1e-4, 5e-5]
+        _batch_sizes   = batch_sizes   or [128, 256, 512]
+        _seq_lens      = seq_lens      or [12, 24, 48, 72]
+        _lstm_hidden_dims = lstm_hidden_dims or [32, 64, 128, 256]
+        _lstm_layers   = lstm_layers   or [1, 2, 3]
+        _ocsvm_nus     = ocsvm_nus     or [0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2]
+        _ocsvm_gammas  = ocsvm_gammas  or ["scale", "auto", "0.001", "0.01", "0.1"]
+        _latent_dims   = latent_dims   or [8, 16, 32]
+        _if_n_estimators   = if_n_estimators_list   or [100, 200, 300, 500]
+        _if_contaminations = if_contamination_list  or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _lof_n_neighbors   = lof_n_neighbors_list   or [10, 20, 50, 100]
+        _lof_contaminations = lof_contamination_list or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _epochs, _patience = epochs, patience
 
     trials: list[TrialConfig] = []
     for val_start, preset, model, threshold in product(_val_starts, _presets, _models, _thresholds):
@@ -321,11 +387,20 @@ def build_trials(
                     epochs=_epochs, patience=_patience,
                 ))
         elif model == "isolation_forest":
-            for n_est in _if_n_estimators:
+            for n_est, cont in product(_if_n_estimators, _if_contaminations):
                 trials.append(TrialConfig(
                     val_start=val_start, preset=preset, model=model,
                     threshold_percentile=threshold,
                     if_n_estimators=n_est,
+                    if_contamination=cont,
+                ))
+        elif model == "lof":
+            for k, cont in product(_lof_n_neighbors, _lof_contaminations):
+                trials.append(TrialConfig(
+                    val_start=val_start, preset=preset, model=model,
+                    threshold_percentile=threshold,
+                    lof_n_neighbors=k,
+                    lof_contamination=cont,
                 ))
         else:
             raise ValueError(f"Modelo desconhecido: {model}")
@@ -388,6 +463,9 @@ def run_trial(
         latent_dim=trial.latent_dim,
         vae_beta=trial.vae_beta,
         if_n_estimators=trial.if_n_estimators,
+        if_contamination=trial.if_contamination,
+        lof_n_neighbors=trial.lof_n_neighbors,
+        lof_contamination=trial.lof_contamination,
     )
 
     scores, threshold, train_errors = score_full(

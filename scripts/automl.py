@@ -86,7 +86,7 @@ def _save_best_artifacts(
     best_scores.to_parquet(output_dir / "best_full_scores.parquet")
     with (output_dir / "best_trial.pkl").open("wb") as f:
         pickle.dump({"trial": best_trial, "results": best_row}, f)
-    if best_trial.model in ("ocsvm", "isolation_forest"):
+    if best_trial.model in ("ocsvm", "isolation_forest", "lof"):
         with (output_dir / "best_model.pkl").open("wb") as f:
             pickle.dump(best_model, f)
     else:
@@ -151,9 +151,13 @@ def run_grid_search(args: argparse.Namespace):
         ocsvm_gammas=args.ocsvm_gammas or None,
         latent_dims=_parse_ints(args.latent_dims, []) or None,
         if_n_estimators_list=_parse_ints(args.if_n_estimators, []) or None,
+        if_contamination_list=_parse_floats(args.if_contaminations, []) or None,
+        lof_n_neighbors_list=_parse_ints(args.lof_n_neighbors, []) or None,
+        lof_contamination_list=_parse_floats(args.lof_contaminations, []) or None,
         epochs=args.epochs if args.epochs is not None else 100,
         patience=args.patience if args.patience is not None else 10,
         quick=args.quick,
+        mode=args.mode,
     )
 
     task = _init_clearml(args, len(trials))
@@ -298,6 +302,9 @@ def _retrain_best(trial: TrialConfig, equipment_id: str, df_pre, device: str):
         latent_dim=trial.latent_dim,
         vae_beta=trial.vae_beta,
         if_n_estimators=trial.if_n_estimators,
+        if_contamination=trial.if_contamination,
+        lof_n_neighbors=trial.lof_n_neighbors,
+        lof_contamination=trial.lof_contamination,
     )
     scores, _, _ = score_full(
         model, trial.model, train_df, full_df,
@@ -318,10 +325,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Diretório para artefatos do melhor trial (default: results/automl_<equipment>/)")
     parser.add_argument("--local-data", action="store_true",
                         help="Carrega dados locais em vez do ClearML Dataset")
+    parser.add_argument("--mode", choices=["quick", "full", "extensive"], default="full",
+                        help="Modo: quick (5-30 min), full (1 dia), extensive (2 dias) — default: full")
     parser.add_argument("--quick", action="store_true",
-                        help="Busca rápida: menos presets, modelos e epochs (smoke test)")
+                        help="Atalho para --mode quick")
     parser.add_argument("--models", nargs="+",
-                        choices=["dense", "lstm", "ocsvm", "vae", "isolation_forest"], default=None)
+                        choices=["dense", "lstm", "ocsvm", "vae", "isolation_forest", "lof"], default=None)
     parser.add_argument("--presets", nargs="+", default=None,
                         help="Presets de preprocessing (default: todos disponíveis para o equipamento)")
     parser.add_argument("--thresholds", nargs="+", default=None,
@@ -347,6 +356,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Dimensões do espaço latente do VAE (default: 8)")
     parser.add_argument("--if-n-estimators", nargs="+", default=None,
                         help="Número de árvores do Isolation Forest (default: 100)")
+    parser.add_argument("--if-contaminations", nargs="+", default=None,
+                        help="Proporção de outliers esperada no Isolation Forest (default: 0.05)")
+    parser.add_argument("--lof-n-neighbors", nargs="+", default=None,
+                        help="Número de vizinhos do LOF (default: 20)")
+    parser.add_argument("--lof-contaminations", nargs="+", default=None,
+                        help="Proporção de outliers esperada no LOF (default: 0.05)")
     parser.add_argument("--remote", action="store_true",
                         help="Envia para execução remota no ClearML (implica --clearml)")
     parser.add_argument("--queue", default="default",

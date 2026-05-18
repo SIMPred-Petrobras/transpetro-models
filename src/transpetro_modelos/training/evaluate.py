@@ -59,6 +59,31 @@ def score_isolation_forest_set(clf, df: pd.DataFrame, threshold: float) -> pd.Da
     )
 
 
+def fit_lof(
+    train_df: pd.DataFrame,
+    n_neighbors: int = 20,
+    contamination: float = 0.05,
+):
+    from sklearn.neighbors import LocalOutlierFactor
+
+    clf = LocalOutlierFactor(n_neighbors=n_neighbors, contamination=contamination, novelty=True)
+    clf.fit(train_df.values.astype("float32"))
+    return clf
+
+
+def compute_lof_errors(clf, df: pd.DataFrame) -> np.ndarray:
+    # score_samples retorna valores negativos; negamos para que maior = mais anômalo
+    return (-clf.score_samples(df.values.astype("float32"))).astype("float32")
+
+
+def score_lof_set(clf, df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    errors = compute_lof_errors(clf, df)
+    return pd.DataFrame(
+        {"reconstruction_error": errors, "is_anomaly": errors > threshold},
+        index=df.index,
+    )
+
+
 def compute_vae_errors(
     model: torch.nn.Module,
     df: pd.DataFrame,
