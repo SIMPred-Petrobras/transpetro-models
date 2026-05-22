@@ -4,6 +4,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+import numpy as np
 
 import pandas as pd
 import torch
@@ -15,17 +16,12 @@ from transpetro_modelos.config import EQUIPMENT_CONFIGS, get_preprocessing_steps
 from transpetro_modelos.data.loading import load_equipment_data
 from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
-from transpetro_modelos.models.autoencoder import DenseAutoencoder
-from transpetro_modelos.training.train import train_autoencoder, make_dataloader
-from transpetro_modelos.training.evaluate import (
-    compute_reconstruction_errors,
-    determine_threshold,
-    score_test_set,
-)
+from transpetro_modelos.training.automl import train_model, score_full
 
 
 def _sensor_slug(sensor_name: str) -> str:
     return re.sub(r"[^0-9a-zA-Z]+", "_", sensor_name).strip("_").lower()
+
 
 
 def _build_sensor_steps(base_steps: list[dict], sensor: str) -> list[dict]:
@@ -108,21 +104,31 @@ def main(
     queue: str = "default",
     upload_to_clearml: bool = True,
     local_artifacts_dir: str = "artifacts_local",
+    model_type: str = "dense",
+    seq_len: int = 24,
+    threshold_percentile: float = 95.0,
+    ocsvm_nu: float = 0.05,
+    val_start_date_override: str | None = None,
+    epochs: int = 200,
+    patience: int = 20,
 ) -> None:
     config = EQUIPMENT_CONFIGS[equipment_id]
     base_steps = get_preprocessing_steps(equipment_id, preset=preprocess_preset)
 
     Task.add_requirements("pyarrow")
+    Task.add_requirements("torch", package_version="")  # já está na imagem Docker
+    model_suffix = "" if model_type == "dense" else f"-{model_type}"
     task_suffix = "" if preprocess_preset == "baseline" else f"-{preprocess_preset}"
     task_name = (
-        f"autoencoder-{equipment_id}-per-sensor{task_suffix}"
+        f"autoencoder-{equipment_id}-per-sensor{task_suffix}{model_suffix}"
         if per_sensor
-        else f"autoencoder-{equipment_id}{task_suffix}"
+        else f"autoencoder-{equipment_id}{task_suffix}{model_suffix}"
     )
     task = Task.init(
         project_name="Transpetro",
         task_name=task_name,
         output_uri=True,
+        reuse_last_task_id=False
     )
     task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
 
@@ -131,19 +137,22 @@ def main(
         "encoding_layers": None,  # None = auto based on n_features
         "learning_rate": 1e-3,
         "batch_size": 256,
-        "epochs": 100,
-        "patience": 10,
+        "epochs": epochs,
+        "patience": patience,
         "exclusion_days": config.exclusion_days_before,
-        "threshold_percentile": 95.0,
+        "threshold_percentile": threshold_percentile,
         "weight_decay": 1e-5,
         "pre_split_steps": config.pre_split_steps,
         "preprocessing_steps": base_steps,
         "preprocess_preset": preprocess_preset,
         "queue": queue,
-        "val_start_date": config.val_start_date.isoformat() if config.val_start_date else None,
+        "val_start_date": val_start_date_override or (config.val_start_date.isoformat() if config.val_start_date else None),
         "per_sensor_mode": per_sensor,
         "upload_to_clearml": upload_to_clearml,
         "local_artifacts_dir": local_artifacts_dir,
+        "model_type": model_type,
+        "seq_len": seq_len,
+        "ocsvm_nu": ocsvm_nu,
     }
     task.connect(hparams)
 
@@ -177,7 +186,6 @@ def main(
         exclusion_days=hparams["exclusion_days"],
         val_start_date=val_start,
     )
-    print(f"  Train: {splits['train'].shape}, Val: {splits['val'].shape}, Test: {splits['test'].shape}")
 
     logger = task.get_logger()
     base_steps = hparams["preprocessing_steps"]
@@ -217,42 +225,36 @@ def main(
 
             n_features = train_df.shape[1]
             encoding_layers = hparams["encoding_layers"]
-            model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
-            print(f"  Model input_dim={n_features}, encoding_layers={encoding_layers}")
-
-            train_loader = make_dataloader(train_df, batch_size=hparams["batch_size"], shuffle=True, device=device)
-            val_loader = make_dataloader(val_df, batch_size=hparams["batch_size"], shuffle=False, device=device)
 
             print("  Training...")
-            model = train_autoencoder(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
+            full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+            model = train_model(
+                hparams["model_type"], train_df, val_df, device,
+                dense_layers=hparams["encoding_layers"],
+                seq_len=hparams["seq_len"],
+                batch_size=hparams["batch_size"],
                 epochs=hparams["epochs"],
                 learning_rate=hparams["learning_rate"],
                 weight_decay=hparams["weight_decay"],
                 patience=hparams["patience"],
-                logger=None,
+                ocsvm_nu=hparams["ocsvm_nu"],
             )
-
-            train_errors = compute_reconstruction_errors(model, train_df, device=device)
-            test_errors = compute_reconstruction_errors(model, test_df, device=device)
-            threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
-            n_anomalies = int((test_errors > threshold).sum())
+            full_scores, threshold, train_errors = score_full(
+                model, hparams["model_type"], train_df, full_df,
+                hparams["threshold_percentile"], device,
+                seq_len=hparams["seq_len"],
+                batch_size=hparams["batch_size"],
+            )
+            test_scores = full_scores.loc[full_scores.index.isin(test_df.index)]
+            test_errors = test_scores["reconstruction_error"].values
+            n_anomalies = int(test_scores["is_anomaly"].sum())
             print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
-
-            test_scores = score_test_set(model, test_df, threshold=threshold, device=device)
-            full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-            full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
 
             # Per-sensor scalar tracking
             logger.report_scalar("metrics_per_sensor", f"{sensor}/threshold", threshold, 0)
             logger.report_scalar("metrics_per_sensor", f"{sensor}/train_mse_mean", float(train_errors.mean()), 0)
             logger.report_scalar("metrics_per_sensor", f"{sensor}/test_mse_mean", float(test_errors.mean()), 0)
             logger.report_scalar("metrics_per_sensor", f"{sensor}/n_anomalies", n_anomalies, 0)
-
-            model_path = f"model_{equipment_id}__{slug}.pt"
-            torch.save(model.state_dict(), model_path)
 
             results = {
                 "sensor": sensor,
@@ -275,13 +277,24 @@ def main(
                 "preprocessing_artifacts": _artifacts_presence(artifacts),
             }
 
-            _publish_artifact(
-                task,
-                f"model_file__{slug}",
-                model_path,
-                local_dir=local_task_dir / "per_sensor",
-                upload_to_clearml=upload_to_clearml,
-            )
+            if hparams["model_type"] == "ocsvm":
+                _publish_artifact(
+                    task,
+                    f"model_file__{slug}",
+                    model,
+                    local_dir=local_task_dir / "per_sensor",
+                    upload_to_clearml=upload_to_clearml,
+                )
+            else:
+                model_path = f"model_{equipment_id}__{slug}.pt"
+                torch.save(model.state_dict(), model_path)
+                _publish_artifact(
+                    task,
+                    f"model_file__{slug}",
+                    model_path,
+                    local_dir=local_task_dir / "per_sensor",
+                    upload_to_clearml=upload_to_clearml,
+                )
             _publish_artifact(
                 task,
                 f"scaler__{slug}",
@@ -377,32 +390,30 @@ def main(
     n_features = train_df.shape[1]
     encoding_layers = hparams["encoding_layers"]
 
-    model = DenseAutoencoder(input_dim=n_features, encoding_layers=encoding_layers).to(device)
-    print(f"  Model input_dim={n_features}, encoding_layers={encoding_layers}")
-
-    train_loader = make_dataloader(train_df, batch_size=hparams["batch_size"], shuffle=True, device=device)
-    val_loader = make_dataloader(val_df, batch_size=hparams["batch_size"], shuffle=False, device=device)
-
     print("Training...")
-    model = train_autoencoder(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
+    full_df = pd.concat([train_df, val_df, test_df]).sort_index()
+    model = train_model(
+        hparams["model_type"], train_df, val_df, device,
+        dense_layers=hparams["encoding_layers"],
+        seq_len=hparams["seq_len"],
+        batch_size=hparams["batch_size"],
         epochs=hparams["epochs"],
         learning_rate=hparams["learning_rate"],
         weight_decay=hparams["weight_decay"],
         patience=hparams["patience"],
         logger=logger,
+        ocsvm_nu=hparams["ocsvm_nu"],
     )
-
-    train_errors = compute_reconstruction_errors(model, train_df, device=device)
-    test_errors = compute_reconstruction_errors(model, test_df, device=device)
-    threshold = determine_threshold(train_errors, percentile=hparams["threshold_percentile"])
-
-    n_anomalies = int((test_errors > threshold).sum())
+    full_scores, threshold, train_errors = score_full(
+        model, hparams["model_type"], train_df, full_df,
+        hparams["threshold_percentile"], device,
+        seq_len=hparams["seq_len"],
+        batch_size=hparams["batch_size"],
+    )
+    scores_df = full_scores.loc[full_scores.index.isin(test_df.index)]
+    test_errors = scores_df["reconstruction_error"].values
+    n_anomalies = int(scores_df["is_anomaly"].sum())
     print(f"  Threshold: {threshold:.6f} | Anomalies in test: {n_anomalies}/{len(test_errors)}")
-
-    scores_df = score_test_set(model, test_df, threshold=threshold, device=device)
 
     logger.report_scalar("metrics", "threshold", threshold, 0)
     logger.report_scalar("metrics", "train_mse_mean", float(train_errors.mean()), 0)
@@ -412,15 +423,24 @@ def main(
     logger.report_scalar("rows", "val_after_preprocessing", val_report.rows_after, 0)
     logger.report_scalar("rows", "test_after_preprocessing", test_report.rows_after, 0)
 
-    model_path = f"model_{equipment_id}.pt"
-    torch.save(model.state_dict(), model_path)
-    _publish_artifact(
-        task,
-        "model_file",
-        model_path,
-        local_dir=local_task_dir,
-        upload_to_clearml=upload_to_clearml,
-    )
+    if hparams["model_type"] == "ocsvm":
+        _publish_artifact(
+            task,
+            "model_file",
+            model,
+            local_dir=local_task_dir,
+            upload_to_clearml=upload_to_clearml,
+        )
+    else:
+        model_path = f"model_{equipment_id}.pt"
+        torch.save(model.state_dict(), model_path)
+        _publish_artifact(
+            task,
+            "model_file",
+            model_path,
+            local_dir=local_task_dir,
+            upload_to_clearml=upload_to_clearml,
+        )
     _publish_artifact(
         task,
         "scaler",
@@ -480,9 +500,6 @@ def main(
         upload_to_clearml=upload_to_clearml,
     )
 
-    print("Scoring full dataset for cross-period analysis...")
-    full_df = pd.concat([train_df, val_df, test_df]).sort_index()
-    full_scores = score_test_set(model, full_df, threshold=threshold, device=device)
     _publish_artifact(
         task,
         "full_scores",
@@ -520,6 +537,47 @@ if __name__ == "__main__":
         default="artifacts_local",
         help="Diretorio base para salvar artifacts localmente",
     )
+    parser.add_argument(
+        "--model",
+        default="dense",
+        choices=["dense", "lstm", "ocsvm"],
+        help="Modelo: dense (padrao), lstm ou ocsvm",
+    )
+    parser.add_argument(
+        "--ocsvm-nu",
+        type=float,
+        default=0.05,
+        help="Parametro nu do One-Class SVM: fracao maxima de outliers no treino (default: 0.05)",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=24,
+        help="Tamanho da janela temporal para o LSTM Autoencoder (default: 24h)",
+    )
+    parser.add_argument(
+        "--threshold-percentile",
+        type=float,
+        default=95.0,
+        help="Percentil dos erros de treino usado como threshold de anomalia (default: 95.0)",
+    )
+    parser.add_argument(
+        "--val-start-date",
+        default=None,
+        help="Sobrescreve o val_start_date do config (formato: YYYY-MM-DD). Ex: 2024-05-01",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=200,
+        help="Numero de epochs de treino (default: 200)",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=20,
+        help="Patience para early stopping (default: 20)",
+    )
     args = parser.parse_args()
     main(
         args.equipment,
@@ -530,4 +588,11 @@ if __name__ == "__main__":
         queue=args.queue,
         upload_to_clearml=not args.no_clearml_upload,
         local_artifacts_dir=args.local_artifacts_dir,
+        model_type=args.model,
+        seq_len=args.seq_len,
+        threshold_percentile=args.threshold_percentile,
+        ocsvm_nu=args.ocsvm_nu,
+        val_start_date_override=args.val_start_date,
+        epochs=args.epochs,
+        patience=args.patience,
     )

@@ -21,25 +21,32 @@ class PreprocessingReport:
 
 
 def filter_running(df: pd.DataFrame, column: str, threshold: float) -> pd.DataFrame:
-    """Remove rows where pump is considered off (column value below threshold)."""
+    """Remove rows where pump is considered off (column value below threshold).
+    If column is not present (e.g. per-sensor mode), returns df unchanged."""
+    if column not in df.columns:
+        return df
     return df[df[column] > threshold].copy()
 
+def remove_negatives(df: pd.DataFrame, column: str) -> pd.DataFrame:
+    df.loc[df[column] < 1, column] = np.nan
+    return df
 
-def remove_transients(df: pd.DataFrame, minutes: int = 10) -> pd.DataFrame:
+def remove_transients(df: pd.DataFrame, minutes: int = 10, gap_minutes: int = 5) -> pd.DataFrame:
     """
     Remove the first N minutes after each pump restart.
-    Detects restarts as gaps > 5 minutes in the index.
+    Detects restarts as gaps > gap_minutes in the index (default 5 min).
+    For hourly resampled data, use gap_minutes=90 to avoid treating
+    every 1-h step as a restart.
     """
     if len(df) == 0:
         return df
 
     time_diff = df.index.to_series().diff()
-    gap_threshold = pd.Timedelta(minutes=5)
+    gap_threshold = pd.Timedelta(minutes=gap_minutes)
     restart_mask = time_diff > gap_threshold
     restart_indices = df.index[restart_mask]
 
     mask = pd.Series(True, index=df.index)
-    # Always remove first N minutes of the dataset
     if len(df) > 0:
         cutoff = df.index[0] + pd.Timedelta(minutes=minutes)
         mask[df.index < cutoff] = False
@@ -49,7 +56,6 @@ def remove_transients(df: pd.DataFrame, minutes: int = 10) -> pd.DataFrame:
         mask[(df.index >= restart_time) & (df.index < cutoff)] = False
 
     return df[mask].copy()
-
 
 def clip(
     df: pd.DataFrame,
@@ -99,11 +105,13 @@ def normalize(
 
     return pd.DataFrame(values, index=df.index, columns=df.columns), scaler
 
-
 def select_features(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     """Select a subset of columns."""
     return df[features].copy()
 
+def interpolate_df(df: pd.DataFrame, method="time", limit=3) -> pd.DataFrame:
+    df = df.interpolate(method=method, limit=limit)
+    return df
 
 def remove_sensor_errors(df: pd.DataFrame, error_values: list[float] | None = None) -> pd.DataFrame:
     """Replace known sensor error codes with NaN (e.g., -25.0 in temperature sensors)."""
@@ -209,6 +217,8 @@ def run_preprocessing(
 
         if step == "filter_running":
             df = filter_running(df, **params)
+        elif step == "remove_negatives":
+            df = remove_negatives(df, **params)
         elif step == "remove_transients":
             df = remove_transients(df, **params)
         elif step == "normalize":
@@ -217,6 +227,10 @@ def run_preprocessing(
             df, artifacts.clip_bounds = clip(df, bounds=artifacts.clip_bounds, **params)
         elif step == "select_features":
             df = select_features(df, **params)
+        elif step == "remove_sensor_errors":
+            df = remove_sensor_errors(df, **params)
+        elif step == "interpolate":
+            df = interpolate_df(df, **params)
         elif step == "resample":
             df = resample(df, **params)
         elif step == "ffill":
@@ -225,8 +239,6 @@ def run_preprocessing(
             df = moving_average(df, **params)
         elif step == "knn_impute":
             df, artifacts.knn_imputer = knn_impute(df, imputer=artifacts.knn_imputer, **params)
-        elif step == "remove_sensor_errors":
-            df = remove_sensor_errors(df, **params)
         else:
             raise ValueError(f"Unknown preprocessing step: '{step}'")
 
