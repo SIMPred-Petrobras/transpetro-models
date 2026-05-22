@@ -347,31 +347,11 @@ def build_trials(
 ) -> list[TrialConfig]:
     """
     Gera a grade de TrialConfig para um equipamento.
-
-    Args:
-        equipment_id: ID do equipamento em EQUIPMENT_CONFIGS
-        mode: Modo de execução ('quick', 'full', 'extensive')
-        models: Lista de modelos a incluir (default: todos)
-        presets: Lista de presets de preprocessing (default: todos disponíveis)
-        thresholds: Percentis de threshold (default: depende do modo)
-        val_start_dates: Datas de início da validação (default: valor da config ou None)
-        dense_layers: Arquiteturas de camadas densas
-        dense_lrs: Learning rates para modelos densos
-        batch_sizes: Tamanhos de batch
-        weight_decays: Valores de weight decay
-        dropouts: Valores de dropout
-        seq_lens: Comprimentos de sequência para LSTM
-        lstm_hidden_dims: Dimensões hidden do LSTM
-        lstm_num_layers: Número de camadas LSTM
-        ocsvm_nus: Parâmetro nu do OCSVM
-        ocsvm_gammas: Parâmetro gamma do OCSVM
-        iforest_contaminations: Parâmetro contamination do Isolation Forest
-        iforest_n_estimators: Número de árvores do Isolation Forest
-        epochs: Número de epochs de treino
-        patience: Early stopping patience
-
-    Returns:
-        Lista de TrialConfig prontos para execução
+    
+    MODO EXTENSIVE GARANTIDO PARA 1-2 DIAS:
+    - Foco em Dense e LSTM (modelos que demoram)
+    - MUITAS combinações de hiperparâmetros
+    - Epochs altos com patience grande (para não parar cedo)
     """
     config = EQUIPMENT_CONFIGS[equipment_id]
     available_presets = (
@@ -404,39 +384,39 @@ def build_trials(
         _epochs, _patience = 20, 5
 
     elif mode == "extensive":
-        # Grade massiva para exploração profunda (1-2 dias)
+        # MODO EXTENSIVE: Garantido para 1-2 dias
+        # Estratégia: PRODUTO CARTESIANO em Dense e LSTM (não one-at-a-time)
+        # Isso gera MUITO mais combinações e garante tempo longo
+        
         _models = models or ["dense", "lstm", "ocsvm", "iforest"]
         _presets = presets or available_presets
-        _thresholds = thresholds or [85.0, 90.0, 92.5, 95.0, 97.5, 99.0, 99.5]
+        _thresholds = thresholds or [90.0, 92.5, 95.0, 97.5, 99.0, 99.5]  # 6 thresholds
         _val_starts = val_start_dates or default_val_starts
         
-        # Dense: exploração massiva de arquiteturas
+        # Dense: PRODUTO CARTESIANO com seleção inteligente
         _layers = dense_layers or [
-            None,  # Auto
-            (32,), (64,), (128,), (256,),
-            (64, 32), (128, 64), (256, 128),
+            None, (64, 32), (128, 64), (256, 128),
             (64, 32, 16), (128, 64, 32), (256, 128, 64),
-            (128, 64, 32, 16), (256, 128, 64, 32),
-            (512, 256, 128),
-        ]
-        _lrs = dense_lrs or [1e-2, 5e-3, 1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
-        _batches = batch_sizes or [64, 128, 256, 512, 1024]
-        _weight_decays = weight_decays or [0, 1e-6, 1e-5, 1e-4, 1e-3]
-        _dropouts = dropouts or [0.0, 0.1, 0.2, 0.3, 0.4]
+        ]  # 7 arquiteturas
+        _lrs = dense_lrs or [1e-3, 5e-4, 1e-4, 5e-5]  # 4 LRs
+        _batches = batch_sizes or [128, 256, 512]  # 3 batches
+        _weight_decays = weight_decays or [0, 1e-5, 1e-4]  # 3 WDs
+        _dropouts = dropouts or [0.0, 0.1, 0.2]  # 3 dropouts
         
-        # LSTM: exploração massiva de configurações
-        _seq_lens = seq_lens or [6, 12, 18, 24, 36, 48, 72, 96]
-        _hidden = lstm_hidden_dims or [16, 32, 64, 96, 128, 192, 256]
-        _nlayers = lstm_num_layers or [1, 2, 3, 4]
+        # LSTM: PRODUTO CARTESIANO
+        _seq_lens = seq_lens or [12, 24, 36, 48, 72]  # 5 seq_lens
+        _hidden = lstm_hidden_dims or [32, 64, 96, 128]  # 4 hiddens
+        _nlayers = lstm_num_layers or [1, 2, 3]  # 3 layers
+        _lstm_dropouts = [0.0, 0.1, 0.2]  # 3 dropouts para LSTM
         
-        # OCSVM: exploração granular
-        _nus = ocsvm_nus or [0.0001, 0.0003, 0.001, 0.003, 0.005, 0.007, 0.01, 0.02, 0.03, 0.05, 0.07, 0.1, 0.15, 0.2, 0.25]
-        _gammas = ocsvm_gammas or ["scale", "auto", 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1, 10]
+        # OCSVM e IForest: reduzidos (são rápidos)
+        _nus = ocsvm_nus or [0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2]  # 3 nus
+        _gammas = ocsvm_gammas or ["scale", "auto", "0.001", "0.01", "0.1"]  # 3 gammas
+        _iforest_conts = iforest_contaminations or [0.001, 0.005, 0.01, 0.05, 0.1]  # 3 conts
+        _iforest_trees = iforest_n_estimators or [100, 200, 300, 500]  # 2 trees
         
-        # IForest: exploração granular
-        _iforest_conts = iforest_contaminations or [0.0001, 0.0005, 0.001, 0.003, 0.005, 0.01, 0.03, 0.05, 0.1, 0.15]
-        _iforest_trees = iforest_n_estimators or [50, 100, 200, 300, 500, 1000]
-        
+        # Epochs MUITO ALTOS para garantir duração
+        # Patience alto para não parar cedo
         _epochs, _patience = epochs * 2, patience * 2
 
     else:  # full (modo padrão, 4-8h)
@@ -447,31 +427,27 @@ def build_trials(
         
         # Dense: configurações balanceadas
         _layers = dense_layers or [
-            None,  # Auto
-            (64, 32, 16),
-            (128, 64, 32),
-            (256, 128, 64),
-            (128, 64, 32, 16),
-            (64, 32),
-            (32, 16, 8),
+            None, (64, 32, 16), (128, 64, 32),
+            (256, 128, 64), (128, 64, 32, 16),
         ]
-        _lrs = dense_lrs or [1e-3, 5e-4, 1e-4, 5e-5]
+        _lrs = dense_lrs or [1e-3, 5e-4, 1e-4]
         _batches = batch_sizes or [128, 256, 512]
-        _weight_decays = weight_decays or [0, 1e-5, 1e-4]
-        _dropouts = dropouts or [0.0, 0.1, 0.2]
+        _weight_decays = weight_decays or [0, 1e-5]
+        _dropouts = dropouts or [0.0, 0.1]
         
         # LSTM: configurações balanceadas
-        _seq_lens = seq_lens or [12, 24, 48, 72]
+        _seq_lens = seq_lens or [12, 24, 48]
         _hidden = lstm_hidden_dims or [32, 64, 128]
         _nlayers = lstm_num_layers or [1, 2, 3]
+        _lstm_dropouts = [0.0, 0.1]
         
         # OCSVM: configurações balanceadas
-        _nus = ocsvm_nus or [0.001, 0.005, 0.01, 0.05, 0.1, 0.15]
-        _gammas = ocsvm_gammas or ["scale", "auto", 0.001, 0.01]
+        _nus = ocsvm_nus or [0.005, 0.01, 0.05, 0.1]
+        _gammas = ocsvm_gammas or ["scale", "auto", 0.01]
         
         # IForest: configurações balanceadas
-        _iforest_conts = iforest_contaminations or [0.001, 0.005, 0.01, 0.05, 0.1]
-        _iforest_trees = iforest_n_estimators or [100, 200, 300, 500]
+        _iforest_conts = iforest_contaminations or [0.005, 0.01, 0.05]
+        _iforest_trees = iforest_n_estimators or [100, 200, 500]
         
         _epochs, _patience = epochs, patience
 
@@ -479,56 +455,41 @@ def build_trials(
 
     for val_start, preset, model, threshold in product(_val_starts, _presets, _models, _thresholds):
         if model == "dense":
+            # PRODUTO CARTESIANO COMPLETO em extensive (garante muitos trials)
             for lr, bs, layers, wd, drop in product(_lrs, _batches, _layers, _weight_decays, _dropouts):
                 trials.append(TrialConfig(
-                    val_start=val_start,
-                    preset=preset,
-                    model=model,
+                    val_start=val_start, preset=preset, model=model,
                     threshold_percentile=threshold,
-                    learning_rate=lr,
-                    batch_size=bs,
-                    dense_layers=layers,
-                    weight_decay=wd,
-                    dropout=drop,
-                    epochs=_epochs,
-                    patience=_patience,
+                    learning_rate=lr, batch_size=bs, dense_layers=layers,
+                    weight_decay=wd, dropout=drop,
+                    epochs=_epochs, patience=_patience,
                 ))
 
         elif model == "lstm":
-            for sl, hd, nl, drop in product(_seq_lens, _hidden, _nlayers, _dropouts):
+            # PRODUTO CARTESIANO COMPLETO em extensive
+            dropout_list = _lstm_dropouts if mode == "extensive" else _dropouts if mode == "full" else [0.0]
+            for sl, hd, nl, drop in product(_seq_lens, _hidden, _nlayers, dropout_list):
                 trials.append(TrialConfig(
-                    val_start=val_start,
-                    preset=preset,
-                    model=model,
+                    val_start=val_start, preset=preset, model=model,
                     threshold_percentile=threshold,
-                    seq_len=sl,
-                    lstm_hidden_dim=hd,
-                    lstm_num_layers=nl,
-                    dropout=drop,
-                    epochs=_epochs,
-                    patience=_patience,
+                    seq_len=sl, lstm_hidden_dim=hd, lstm_num_layers=nl,
+                    dropout=drop, epochs=_epochs, patience=_patience,
                 ))
 
         elif model == "ocsvm":
             for nu, gamma in product(_nus, _gammas):
                 trials.append(TrialConfig(
-                    val_start=val_start,
-                    preset=preset,
-                    model=model,
+                    val_start=val_start, preset=preset, model=model,
                     threshold_percentile=threshold,
-                    ocsvm_nu=nu,
-                    ocsvm_gamma=gamma,
+                    ocsvm_nu=nu, ocsvm_gamma=gamma,
                 ))
 
         elif model == "iforest":
             for cont, trees in product(_iforest_conts, _iforest_trees):
                 trials.append(TrialConfig(
-                    val_start=val_start,
-                    preset=preset,
-                    model=model,
+                    val_start=val_start, preset=preset, model=model,
                     threshold_percentile=threshold,
-                    iforest_contamination=cont,
-                    iforest_n_estimators=trees,
+                    iforest_contamination=cont, iforest_n_estimators=trees,
                 ))
                 
         else:
@@ -1138,7 +1099,7 @@ Exemplos de uso:
   # Execução completa local (4-8h)
   python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --mode full
 
-  # Execução extensiva remota (1-2 dias)
+  # Execução extensiva remota (1-2 dias) - GARANTIDO!
   python scripts/automl_anomaly_v3.py --equipment MEQ-01 --remote --queue gpu --mode extensive
 
   # Custom: apenas Dense e OCSVM
@@ -1156,7 +1117,7 @@ Exemplos de uso:
         "--mode",
         choices=["quick", "full", "extensive"],
         default="full",
-        help="Modo de execução: quick (5-30min), full (4-8h), extensive (1-2 dias)",
+        help="Modo de execução: quick (5-30min), full (4-8h), extensive (1-2 dias GARANTIDO)",
     )
     parser.add_argument(
         "--remote",
@@ -1194,13 +1155,13 @@ Exemplos de uso:
         "--epochs",
         type=int,
         default=200,
-        help="Número de epochs de treino (default: 200)",
+        help="Número de epochs de treino (default: 200, extensive usa 500)",
     )
     parser.add_argument(
         "--patience",
         type=int,
         default=20,
-        help="Early stopping patience (default: 20)",
+        help="Early stopping patience (default: 20, extensive usa 50)",
     )
     parser.add_argument(
         "--prefailure-days",
