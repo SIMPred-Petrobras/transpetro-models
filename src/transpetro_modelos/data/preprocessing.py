@@ -174,6 +174,52 @@ def knn_impute(
     return pd.DataFrame(values, index=df.index, columns=df.columns), imputer
 
 
+def add_rolling_features(
+    df: pd.DataFrame,
+    windows: list[int] | None = None,
+    include_diff: bool = True,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Adiciona features de janela deslizante causal (média, desvio padrão, diff) lado a lado
+    com as colunas originais.
+
+    Parâmetros
+    ----------
+    windows : list[int]
+        Tamanhos das janelas em número de períodos. Ex.: [6, 24] para dados horários
+        equivale a 6 h e 24 h. Default: [6, 24].
+    include_diff : bool
+        Se True, inclui a primeira diferença (taxa de mudança) de cada sensor.
+    columns : list[str] | None
+        Colunas a expandir. Default: todas.
+
+    Notas
+    -----
+    - Usa rolling causal (center=False), sem look-ahead.
+    - Linhas com NaN gerados no início de cada janela são removidas via dropna().
+    - Aplique este passo ANTES do clip/normalize no preset para que os limites
+      de clipping sejam calculados sobre as features enriquecidas.
+    - Em val/test o mesmo conjunto de colunas que o train produz é gerado, pois
+      a lista de colunas é derivada dos dados de entrada.
+    """
+    if windows is None:
+        windows = [6, 24]
+    if columns is None:
+        columns = list(df.columns)
+
+    df = df.copy()
+    for col in columns:
+        for w in windows:
+            min_p = max(2, w // 2)
+            df[f"{col}__std{w}"] = df[col].rolling(w, min_periods=min_p).std()
+            df[f"{col}__mean{w}"] = df[col].rolling(w, min_periods=min_p).mean()
+        if include_diff:
+            df[f"{col}__diff"] = df[col].diff()
+
+    return df.dropna()
+
+
 def run_preprocessing(
     df: pd.DataFrame,
     steps: list[dict],
@@ -239,6 +285,8 @@ def run_preprocessing(
             df = moving_average(df, **params)
         elif step == "knn_impute":
             df, artifacts.knn_imputer = knn_impute(df, imputer=artifacts.knn_imputer, **params)
+        elif step == "add_rolling_features":
+            df = add_rolling_features(df, **params)
         else:
             raise ValueError(f"Unknown preprocessing step: '{step}'")
 

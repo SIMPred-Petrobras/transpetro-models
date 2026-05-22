@@ -59,6 +59,27 @@ B4064A_NOVOS_PREPROCESS_PRESETS: dict[str, list[dict]] = {
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
     ],
+    # Presets com features de janela deslizante (std, média, diff).
+    # Dados horários: windows=[6, 24] = 6 h e 24 h.
+    # O add_rolling_features vem antes do clip para que os limites sejam
+    # calculados sobre o conjunto enriquecido.
+    "rolling": [
+        {"step": "add_rolling_features", "windows": [6, 24]},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+    "rolling_ma": [
+        {"step": "moving_average", "window": 3, "min_periods": 1},
+        {"step": "add_rolling_features", "windows": [6, 24]},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+    "rolling_thermal": [
+        {"step": "select_features", "features": _THERMAL_VIB_FEATURES},
+        {"step": "add_rolling_features", "windows": [6, 24]},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
 }
 
 
@@ -121,6 +142,24 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "clip", "upper_pct": 99.9},
             {"step": "normalize", "method": "robust"},
         ],
+        # Dados em 5 min: windows=[12, 72] = 1 h e 6 h
+        preprocess_presets={
+            "baseline": [
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "rolling": [
+                {"step": "add_rolling_features", "windows": [12, 72]},
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "rolling_ma": [
+                {"step": "moving_average", "window": 3, "min_periods": 1},
+                {"step": "add_rolling_features", "windows": [12, 72]},
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+        },
     ),
     "B-8802B-8s": EquipmentConfig(
         equipment_id="B-8802B-8s",

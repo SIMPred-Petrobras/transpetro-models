@@ -190,11 +190,101 @@ def determine_threshold(train_errors: np.ndarray, percentile: float = 95.0) -> f
     return float(np.percentile(train_errors, percentile))
 
 
+def find_threshold_for_fp_rate(train_errors: np.ndarray, max_fp_rate: float = 0.01) -> float:
+    """
+    Determina o threshold mínimo tal que no máximo max_fp_rate dos pontos de treino
+    sejam classificados como anomalia.
+
+    Equivalente ao percentil (1 - max_fp_rate) * 100 dos erros de treino.
+    Use quando o objetivo primário é controlar falsos positivos.
+    """
+    percentile = np.clip((1.0 - max_fp_rate) * 100.0, 0.0, 100.0)
+    return float(np.percentile(train_errors, percentile))
+
+
+def apply_debounce(scores: pd.DataFrame, consecutive: int = 1) -> pd.DataFrame:
+    """
+    Exige N pontos consecutivos anômalos antes de disparar um alarme.
+
+    consecutive=1 equivale a nenhum debounce (comportamento original).
+    Para dados em 5 min, consecutive=6 exige 30 min contínuos.
+    Para dados horários, consecutive=6 exige 6 horas contínuas.
+
+    O alarme é atribuído ao último ponto da sequência; pontos anteriores
+    ao tamanho da janela ficam como False.
+    """
+    if consecutive <= 1:
+        return scores
+    rolling_count = scores["is_anomaly"].astype(int).rolling(consecutive, min_periods=consecutive).sum()
+    debounced = (rolling_count >= consecutive).fillna(False)
+    result = scores.copy()
+    result["is_anomaly"] = debounced
+    return result
+
+
+def cusum_anomaly_score(
+    errors: np.ndarray,
+    k: float = 0.5,
+    h: float = 5.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    CUSUM unilateral (upper) sobre erros de reconstrução para detectar
+    aumentos persistentes no nível médio.
+
+    Parâmetros
+    ----------
+    k : folga em unidades de std (tipicamente 0.5 × delta mínimo a detectar)
+    h : limiar de decisão em unidades de std
+
+    Retorna
+    -------
+    cusum_values : acumulador CUSUM normalizado (float32)
+    is_alarm     : True nos pontos onde acumulador >= h
+
+    O CUSUM ignora spikes isolados — exige que o sinal permaneça elevado por
+    vários períodos, tornando-o menos suscetível a falsos positivos que o
+    threshold por percentil.
+    """
+    mu = float(np.mean(errors))
+    sigma = float(np.std(errors))
+    if sigma < 1e-10:
+        return np.zeros(len(errors), dtype=np.float32), np.zeros(len(errors), dtype=bool)
+
+    z = (errors - mu) / sigma
+    cusum = np.zeros(len(z), dtype=np.float64)
+    for i in range(1, len(z)):
+        cusum[i] = max(0.0, cusum[i - 1] + z[i] - k)
+
+    return cusum.astype(np.float32), (cusum >= h)
+
+
+def score_with_cusum(
+    errors: np.ndarray,
+    index: pd.Index,
+    k: float = 0.5,
+    h: float = 5.0,
+) -> pd.DataFrame:
+    """
+    Converte erros de reconstrução em DataFrame de scores usando CUSUM.
+    Colunas: reconstruction_error, cusum_value, is_anomaly.
+    """
+    cusum_values, is_alarm = cusum_anomaly_score(errors, k=k, h=h)
+    return pd.DataFrame(
+        {
+            "reconstruction_error": errors,
+            "cusum_value": cusum_values,
+            "is_anomaly": is_alarm,
+        },
+        index=index,
+    )
+
+
 def failure_detection_metrics(
     scores: pd.DataFrame,
     failure_date: datetime,
     prefailure_days: int = 30,
     normal_end_days: int = 60,
+    consecutive: int = 1,
 ) -> dict[str, float | int]:
     """
     Métricas de detecção de falha a partir de um DataFrame de scores (coluna is_anomaly).
@@ -203,12 +293,21 @@ def failure_detection_metrics(
       - normal: tudo antes de (failure_date - normal_end_days)
       - pré-falha: (failure_date - prefailure_days) até failure_date
 
+    Parâmetros
+    ----------
+    consecutive : int
+        Aplica debounce: exige este número de pontos consecutivos anômalos
+        antes de contar o alarme. consecutive=1 desabilita (comportamento original).
+
     Retorna:
       composite_score         = prefailure_alert_rate * (1 - normal_alert_rate)  [0..1, primário]
       discrimination_ratio    = prefailure_alert_rate / (normal_alert_rate + eps) [auxiliar]
       prefailure_alert_rate   = fração de alarmes na janela pré-falha
       normal_alert_rate       = fração de alarmes no período normal
     """
+    if consecutive > 1:
+        scores = apply_debounce(scores, consecutive=consecutive)
+
     _EPS = 1e-9
     failure_ts = pd.Timestamp(failure_date)
     normal_end = failure_ts - pd.Timedelta(days=normal_end_days)

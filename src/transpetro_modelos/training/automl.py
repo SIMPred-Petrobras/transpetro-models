@@ -219,6 +219,7 @@ class TrialConfig:
     if_contamination: float = 0.05
     lof_n_neighbors: int = 20
     lof_contamination: float = 0.05
+    debounce_consecutive: int = 1  # 1 = sem debounce; >1 = N pontos consecutivos necessários
 
     def label(self) -> str:
         vs = self.val_start.strftime("%Y-%m-%d") if self.val_start else "auto"
@@ -241,6 +242,8 @@ class TrialConfig:
             parts.extend([f"k{self.lof_n_neighbors}", f"cont{self.lof_contamination:g}"])
         else:  # ocsvm
             parts.extend([f"nu{self.ocsvm_nu:g}", f"gamma{self.ocsvm_gamma}"])
+        if self.debounce_consecutive > 1:
+            parts.append(f"deb{self.debounce_consecutive}")
         return "__".join(parts)
 
 
@@ -266,6 +269,7 @@ def build_trials(
     if_contamination_list: list[float] | None = None,
     lof_n_neighbors_list: list[int] | None = None,
     lof_contamination_list: list[float] | None = None,
+    debounce_consecutives: list[int] | None = None,
     epochs: int = 100,
     patience: int = 10,
     quick: bool = False,
@@ -310,6 +314,7 @@ def build_trials(
         _if_contaminations = if_contamination_list  or [0.05]
         _lof_n_neighbors   = lof_n_neighbors_list   or [20]
         _lof_contaminations = lof_contamination_list or [0.05]
+        _debounces     = debounce_consecutives or [1]
         _epochs, _patience = 20, 5
 
     elif mode == "extensive":
@@ -330,6 +335,7 @@ def build_trials(
         _if_contaminations = if_contamination_list  or [0.001, 0.005, 0.01, 0.05, 0.1]
         _lof_n_neighbors   = lof_n_neighbors_list   or [10, 20, 50, 100]
         _lof_contaminations = lof_contamination_list or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _debounces     = debounce_consecutives or [1, 2, 4, 6, 12]
         _epochs, _patience = epochs * 2, patience * 2
 
     else:  # full (default, ~1 dia)
@@ -350,10 +356,11 @@ def build_trials(
         _if_contaminations = if_contamination_list  or [0.001, 0.005, 0.01, 0.05, 0.1]
         _lof_n_neighbors   = lof_n_neighbors_list   or [10, 20, 50, 100]
         _lof_contaminations = lof_contamination_list or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _debounces     = debounce_consecutives or [1, 4, 6]
         _epochs, _patience = epochs, patience
 
     trials: list[TrialConfig] = []
-    for val_start, preset, model, threshold in product(_val_starts, _presets, _models, _thresholds):
+    for val_start, preset, model, threshold, deb in product(_val_starts, _presets, _models, _thresholds, _debounces):
         if model == "dense":
             for lr, bs, layers in product(_dense_lrs, _batch_sizes, _dense_layers):
                 trials.append(TrialConfig(
@@ -361,6 +368,7 @@ def build_trials(
                     threshold_percentile=threshold,
                     learning_rate=lr, batch_size=bs, dense_layers=layers,
                     epochs=_epochs, patience=_patience,
+                    debounce_consecutive=deb,
                 ))
         elif model == "lstm":
             for sl, hd, nl in product(_seq_lens, _lstm_hidden_dims, _lstm_layers):
@@ -369,6 +377,7 @@ def build_trials(
                     threshold_percentile=threshold,
                     seq_len=sl, lstm_hidden_dim=hd, lstm_num_layers=nl,
                     epochs=_epochs, patience=_patience,
+                    debounce_consecutive=deb,
                 ))
         elif model == "ocsvm":
             for nu, gamma in product(_ocsvm_nus, _ocsvm_gammas):
@@ -376,6 +385,7 @@ def build_trials(
                     val_start=val_start, preset=preset, model=model,
                     threshold_percentile=threshold,
                     ocsvm_nu=nu, ocsvm_gamma=gamma,
+                    debounce_consecutive=deb,
                 ))
         elif model == "vae":
             for lr, bs, layers, ldim in product(_dense_lrs, _batch_sizes, _dense_layers, _latent_dims):
@@ -385,6 +395,7 @@ def build_trials(
                     learning_rate=lr, batch_size=bs, dense_layers=layers,
                     latent_dim=ldim,
                     epochs=_epochs, patience=_patience,
+                    debounce_consecutive=deb,
                 ))
         elif model == "isolation_forest":
             for n_est, cont in product(_if_n_estimators, _if_contaminations):
@@ -393,6 +404,7 @@ def build_trials(
                     threshold_percentile=threshold,
                     if_n_estimators=n_est,
                     if_contamination=cont,
+                    debounce_consecutive=deb,
                 ))
         elif model == "lof":
             for k, cont in product(_lof_n_neighbors, _lof_contaminations):
@@ -401,6 +413,7 @@ def build_trials(
                     threshold_percentile=threshold,
                     lof_n_neighbors=k,
                     lof_contamination=cont,
+                    debounce_consecutive=deb,
                 ))
         else:
             raise ValueError(f"Modelo desconhecido: {model}")
@@ -480,6 +493,7 @@ def run_trial(
         config.failure_date,
         prefailure_days=prefailure_days,
         normal_end_days=normal_end_days,
+        consecutive=trial.debounce_consecutive,
     )
 
     row = asdict(trial)
@@ -502,11 +516,43 @@ def run_trial(
 
 # ── Result ranking ─────────────────────────────────────────────────────────────
 
-def rank_results(rows: list[dict[str, Any]]) -> pd.DataFrame:
-    """Ordena trials por composite_score (primário), prefailure_alert_rate, normal_alert_rate."""
+def rank_results(
+    rows: list[dict[str, Any]],
+    max_fp_rate: float | None = None,
+) -> pd.DataFrame:
+    """
+    Ordena trials priorizando baixos falsos positivos.
+
+    Se max_fp_rate for fornecido, aplica uma constraint hard:
+      - Apenas trials com normal_alert_rate <= max_fp_rate são considerados viáveis.
+      - Dentro dos viáveis, ordena por prefailure_alert_rate (maximiza detecção).
+      - Se nenhum trial satisfaz a constraint, retorna todos ordenados por
+        normal_alert_rate crescente (o menos pior em FP primeiro).
+
+    Se max_fp_rate=None, usa o critério original: composite_score descendente.
+    """
+    df = pd.DataFrame(rows)
+
+    if max_fp_rate is not None:
+        viable = df[df["normal_alert_rate"] <= max_fp_rate]
+        if len(viable) == 0:
+            return (
+                df.sort_values(
+                    ["normal_alert_rate", "prefailure_alert_rate"],
+                    ascending=[True, False],
+                )
+                .reset_index(drop=True)
+            )
+        return (
+            viable.sort_values(
+                ["prefailure_alert_rate", "normal_alert_rate"],
+                ascending=[False, True],
+            )
+            .reset_index(drop=True)
+        )
+
     return (
-        pd.DataFrame(rows)
-        .sort_values(
+        df.sort_values(
             ["composite_score", "prefailure_alert_rate", "normal_alert_rate"],
             ascending=[False, False, True],
         )
