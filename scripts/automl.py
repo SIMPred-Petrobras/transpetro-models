@@ -554,7 +554,8 @@ def run_trial(
         return_artifacts=True, return_report=True
     )
 
-    if len(train_df) < min_rows or len(val_df) < min_rows or len(full_df) < min_rows:
+    if len(splits["train"]) < min_rows or len(splits["val"]) < min_rows:
+        print(f"  [SKIP] train={len(splits['train'])} val={len(splits['val'])} min={min_rows}")
         return None
 
     # 3. TREINO

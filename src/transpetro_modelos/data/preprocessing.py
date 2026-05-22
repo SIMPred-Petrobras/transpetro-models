@@ -27,13 +27,18 @@ def filter_running(df: pd.DataFrame, column: str, threshold: float) -> pd.DataFr
         return df
     return df[df[column] > threshold].copy()
 
-def filter_threshold(df: pd.DataFrame, columns: list[str], threshold: float) -> pd.DataFrame:
+def filter_threshold(df: pd.DataFrame, columns: list[str], threshold: float, mode: str = "all") -> pd.DataFrame:
     existing = [c for c in columns if c in df.columns]
 
     if not existing:
         return df
 
-    mask = df[existing].gt(threshold).all(axis=1)
+    if mode == "any":
+        mask = df[existing].gt(threshold).any(axis=1)
+    elif mode == "all":
+        mask = df[existing].gt(threshold).all(axis=1)
+    else:
+        raise ValueError("mode must be 'any' or 'all'")
 
     return df[mask].copy()
 

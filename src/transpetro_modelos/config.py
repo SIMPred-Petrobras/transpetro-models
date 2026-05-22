@@ -151,6 +151,24 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
         preprocess_presets=INTERPOLATED_PRESETS,
+    ),
+
+    "B-24001B_interpolated": EquipmentConfig(
+        equipment_id="B-24001B_interpolated",
+        failure_date=datetime(2025, 1, 6),
+        failure_description="Vibração elevada mancal LNA da bomba	",
+        dataset_name="transpetro-b-24001b_interpolated",
+        datetime_column="Timestamp",
+        exclusion_days_before=10,
+        local_feather="Dados/B-24001B_interpolated.csv",
+        val_start_date=datetime(2024, 11, 27),
+        val_end_date=datetime(2024, 12, 27),
+        pre_split_steps=[
+            {"step": "filter_threshold", "columns": ['VIBRAÇÃO DO MANCAL BOMBA LA', 'VIBRAÇÃO DO MANCAL BOMBA LNA ', 'VIBRAÇÃO DO MANCAL MOTOR LA (003)', 'VIBRAÇÃO DO MANCAL MOTOR LA (004)', 'VIBRAÇÃO DO MANCAL MOTOR LNA (005)', 'VIBRAÇÃO DO MANCAL MOTOR LNA (006)'], "threshold": 1, "mode": "any"},
+            {"step": "remove_transients", "minutes": 10},
+        ],
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
+        preprocess_presets=INTERPOLATED_PRESETS,
     )
 }
 
