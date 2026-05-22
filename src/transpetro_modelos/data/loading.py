@@ -20,26 +20,22 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
     """
     config = EQUIPMENT_CONFIGS[equipment_id]
 
+    stem = config.dataset_file_stem or equipment_id
+
     if from_clearml:
         from clearml import Dataset
         ds = Dataset.get(
             dataset_name=config.dataset_name,
             dataset_project="Transpetro",
         )
-        local_path = ds.get_local_copy()
-        base = Path(local_path) / (config.dataset_file_stem or equipment_id)
-        if base.with_suffix(".feather").exists():
-            file_path = base.with_suffix(".feather")
-        else:
-            file_path = base.with_suffix(".csv")
+        local_path = Path(ds.get_local_copy())
+        feather_path = local_path / f"{stem}.feather"
+        file_path = feather_path if feather_path.exists() else local_path / f"{stem}.csv"
     elif config.local_feather is not None:
         file_path = PROJECT_ROOT / config.local_feather
     else:
-        base = LOCAL_DATA_DIR / (config.dataset_file_stem or equipment_id)
-        if base.with_suffix(".feather").exists():
-            file_path = base.with_suffix(".feather")
-        else:
-            file_path = base.with_suffix(".csv")
+        feather_path = LOCAL_DATA_DIR / f"{stem}.feather"
+        file_path = feather_path if feather_path.exists() else LOCAL_DATA_DIR / f"{stem}.csv"
 
     df = _read_file(file_path)
 
