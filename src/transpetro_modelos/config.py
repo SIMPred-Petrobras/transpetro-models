@@ -207,9 +207,10 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         local_feather="DadosV2/B-4703.24001B.feather",
         pre_split_steps=[
             {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
-            {"step": "remove_transients", "minutes": 15},
+            {"step": "remove_transients", "minutes": 60},
             {"step": "resample", "freq": "5min"},
             {"step": "ffill", "limit": 4},
+            {"step": "moving_average", "window": 3, "min_periods": 1},
             {"step": "select_features", "features": [
                 "Corrente",
                 "Pressão Sucção",
