@@ -168,6 +168,10 @@ def run_grid_search(args: argparse.Namespace):
     print(f"  Após pré-split: {df_pre.shape}")
     print(f"\nTotal de trials: {len(trials)}\n")
 
+    # Constraint hard de falso positivo: só considera "melhor" trial com FP <= max_fp_rate.
+    # Valor 0 desativa a constraint (usa composite_score puro como antes).
+    max_fp_rate: float = args.max_fp_rate
+
     rows = []
     best_model = None
     best_scores = None
@@ -190,10 +194,11 @@ def run_grid_search(args: argparse.Namespace):
             rows.append(row)
             cs = float(row["composite_score"])
             ratio = float(row["discrimination_ratio"])
+            fp = float(row["normal_alert_rate"])
             print(
                 f"composite={cs:.4f}  ratio={ratio:.2f}"
                 f"  (pre={float(row['prefailure_alert_rate']):.2%}"
-                f" / normal={float(row['normal_alert_rate']):.2%})"
+                f" / normal={fp:.2%})"
             )
 
             if task is not None:
@@ -201,10 +206,13 @@ def run_grid_search(args: argparse.Namespace):
                 logger.report_scalar("automl", "composite_score", cs, iteration=i)
                 logger.report_scalar("automl", "discrimination_ratio", ratio, iteration=i)
                 logger.report_scalar("automl", "prefailure_alert_rate", float(row["prefailure_alert_rate"]), iteration=i)
-                logger.report_scalar("automl", "normal_alert_rate", float(row["normal_alert_rate"]), iteration=i)
+                logger.report_scalar("automl", "normal_alert_rate", fp, iteration=i)
 
-            if cs > best_score:
-                best_score = cs
+            # Critério de seleção do melhor: FP dentro da constraint E maior detecção pré-falha
+            fp_ok = (max_fp_rate <= 0) or (fp <= max_fp_rate)
+            candidate_score = float(row["prefailure_alert_rate"]) if (max_fp_rate > 0) else cs
+            if fp_ok and candidate_score > best_score:
+                best_score = candidate_score
                 best_trial = trial
                 best_row = row
                 # Re-treina para guardar o modelo (run_trial não retorna o modelo)
@@ -216,7 +224,7 @@ def run_grid_search(args: argparse.Namespace):
     if not rows:
         raise RuntimeError("Nenhum trial válido foi executado.")
 
-    results = rank_results(rows)
+    results = rank_results(rows, max_fp_rate=max_fp_rate if max_fp_rate > 0 else None)
 
     print("\n" + "=" * 100)
     print("TOP 10 configurações:")
@@ -371,6 +379,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clearml-project", default="Transpetro")
     parser.add_argument("--clearml-task-name", default=None,
                         help="Nome da task ClearML (default: automl-anomaly-<equipment>)")
+    parser.add_argument("--max-fp-rate", type=float, default=0.01,
+                        help="Constraint máxima de falso positivo no período normal (default: 0.01 = 1%%). "
+                             "Use 0 para desabilitar e usar composite_score puro.")
     return parser
 
 
