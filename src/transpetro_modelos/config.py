@@ -133,9 +133,11 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         pre_split_steps=[
             {"step": "remove_sensor_errors", "error_values": [0.0]},
             {"step": "filter_running", "column": "Pressão Descarga", "threshold": 35.0},
-            {"step": "remove_transients", "minutes": 15},
             {"step": "resample", "freq": "5min"},
             {"step": "ffill", "limit": 4},
+            # Temperatura leva ~90 min para estabilizar após reinício (gap_minutes=30 evita
+            # tratar cada intervalo de 5min como reinício independente).
+            {"step": "remove_transients", "minutes": 90, "gap_minutes": 30},
             {"step": "select_features", "features": ["Pressão Sucção", "Pressão Descarga", "Vibração Bomba LA", "Vibração Bomba LNA", "Temperatura Bomba LA"]},
         ],
         preprocessing_steps=[
@@ -264,6 +266,32 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
                 "Temperatura Motor LA",
                 "Temperatura Motor LNA",
             ]},
+        ],
+        preprocessing_steps=[
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
+        ],
+    ),
+    "B-0302C": EquipmentConfig(
+        equipment_id="B-0302C",
+        failure_date=datetime(2024, 8, 30, 0, 0),
+        failure_description="Falha no motor elétrico com aumento de vibração",
+        dataset_name="transpetro-b-0302c",
+        datetime_column=None,
+        exclusion_days_before=10,
+        local_feather="DadosV2/B-0302C_pivoted.feather",
+        pre_split_steps=[
+            # Sensores elétricos (temperatura enrolamento, desbalanço, tensão) estão todos
+            # zerados no dataset — apenas vibração e pressão diferencial têm dados contínuos.
+            # select_features antes do remove_sensor_errors garante que só as colunas úteis
+            # sejam verificadas (remove as 83 linhas de falha de telemetria).
+            {"step": "select_features", "features": [
+                "Vibração Mancal Bomba LA",
+                "Pressão diferencial filtro",
+            ]},
+            {"step": "remove_sensor_errors", "error_values": [0.0]},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
         ],
         preprocessing_steps=[
             {"step": "clip", "upper_pct": 99.9},
