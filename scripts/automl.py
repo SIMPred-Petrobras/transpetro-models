@@ -1,16 +1,18 @@
 """
-AutoML para Detecção de Anomalias
+AutoML para Detecção de Anomalias - VERSÃO CORRIGIDA
 ==================================
 Modelos : Dense Autoencoder | LSTM Autoencoder | One-Class SVM | Isolation Forest
-Seleção : Score composto (val_loss + anomaly_rate + threshold_ratio)
+Seleção : Score composto balanceado com penalização de falsos positivos
 Busca   : Grid search declarativo via build_trials()
 
 Uso rápido:
     python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --mode quick
-Uso completo:
-    python scripts/automl_anomaly_v3.py --equipment MEQ-01 --remote --queue gpu --mode full
+
 Uso extensivo (1-2 dias):
     python scripts/automl_anomaly_v3.py --equipment MEQ-01 --remote --queue gpu --mode extensive
+    
+Uso com constraint de FP (máx 1%):
+    python scripts/automl_anomaly_v3.py --equipment MEQ-01 --mode extensive --max-fp-rate 0.01
 """
 
 import argparse
@@ -37,11 +39,11 @@ from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_pr
 from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
 from transpetro_modelos.training.evaluate import (
+    compute_balanced_score,
     compute_ocsvm_errors,
     compute_reconstruction_errors,
     compute_reconstruction_errors_sequence,
     determine_threshold,
-    failure_detection_metrics,
     fit_ocsvm,
     score_ocsvm_set,
     score_test_set,
@@ -57,32 +59,22 @@ from transpetro_modelos.training.train import (
 )
 
 
-# ── Type Aliases ───────────────────────────────────────────────────────────────
-
 ModelType = Literal["dense", "lstm", "ocsvm", "iforest"]
 PresetName = str
 ModeType = Literal["quick", "full", "extensive"]
 
 
-# ── TrialConfig ────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# TrialConfig
+# ════════════════════════════════════════════════════════════════
 
 @dataclass(frozen=True)
 class TrialConfig:
-    """
-    Configuração imutável de um trial de AutoML.
-
-    Suporta quatro tipos de modelo:
-    - dense: Autoencoder denso com camadas customizáveis
-    - lstm: Autoencoder sequencial para séries temporais
-    - ocsvm: One-Class SVM para detecção de outliers
-    - iforest: Isolation Forest para detecção de outliers
-    """
-    val_start: datetime | None  # None = usa val_fraction=0.2 do temporal_split
+    """Configuração imutável de um trial de AutoML."""
+    val_start: datetime | None
     preset: str
     model: ModelType
     threshold_percentile: float
-
-    # Dense hyperparameters
     learning_rate: float = 1e-3
     batch_size: int = 256
     weight_decay: float = 1e-5
@@ -90,45 +82,24 @@ class TrialConfig:
     patience: int = 10
     dense_layers: tuple[int, ...] | None = None
     dropout: float = 0.0
-
-    # LSTM hyperparameters
     seq_len: int = 24
     lstm_hidden_dim: int = 64
     lstm_num_layers: int = 2
-
-    # OCSVM hyperparameters
     ocsvm_nu: float = 0.05
     ocsvm_gamma: str | float = "scale"
-
-    # Isolation Forest hyperparameters
     iforest_contamination: float = 0.05
     iforest_n_estimators: int = 100
+    debounce_consecutive: int = 1
 
     def __post_init__(self):
-        """Valida configuração após inicialização."""
+        """Valida configuração."""
         if self.model not in {"dense", "lstm", "ocsvm", "iforest"}:
-            raise ValueError(f"Modelo inválido: {self.model}. Use: dense, lstm, ocsvm ou iforest")
-
+            raise ValueError(f"Modelo inválido: {self.model}")
         if not 0 < self.threshold_percentile <= 100:
-            raise ValueError(
-                f"threshold_percentile deve estar entre 0 e 100, "
-                f"recebido: {self.threshold_percentile}"
-            )
-
-        if self.model == "lstm" and self.seq_len < 1:
-            raise ValueError(f"seq_len deve ser >= 1, recebido: {self.seq_len}")
-
-        if self.batch_size < 1:
-            raise ValueError(f"batch_size deve ser >= 1, recebido: {self.batch_size}")
-
-        if self.epochs < 1:
-            raise ValueError(f"epochs deve ser >= 1, recebido: {self.epochs}")
-
-        if not 0 <= self.dropout < 1:
-            raise ValueError(f"dropout deve estar entre 0 e 1, recebido: {self.dropout}")
+            raise ValueError(f"threshold_percentile inválido: {self.threshold_percentile}")
 
     def label(self) -> str:
-        """Gera identificador único e legível para o trial."""
+        """Gera identificador único e legível."""
         vs = self.val_start.strftime("%Y-%m-%d") if self.val_start else "auto"
         parts = [vs, self.preset, self.model, f"p{self.threshold_percentile:g}"]
 
@@ -139,8 +110,6 @@ class TrialConfig:
                 parts.append(f"arch_{layers_str}")
             if self.dropout > 0:
                 parts.append(f"drop{self.dropout:g}")
-            if self.weight_decay != 1e-5:
-                parts.append(f"wd{self.weight_decay:g}")
 
         elif self.model == "lstm":
             parts.extend([
@@ -156,15 +125,17 @@ class TrialConfig:
                 f"cont{self.iforest_contamination:g}",
                 f"trees{self.iforest_n_estimators}"
             ])
-
         else:  # ocsvm
             gamma_str = f"{self.ocsvm_gamma:g}" if isinstance(self.ocsvm_gamma, float) else self.ocsvm_gamma
             parts.extend([f"nu{self.ocsvm_nu:g}", f"gamma_{gamma_str}"])
 
+        if self.debounce_consecutive > 1:
+            parts.append(f"deb{self.debounce_consecutive}")
+
         return "__".join(parts)
 
     def to_dict(self) -> dict[str, Any]:
-        """Converte para dict serializável (para logging/storage)."""
+        """Converte para dict serializável."""
         d = asdict(self)
         d["val_start"] = self.val_start.strftime("%Y-%m-%d") if self.val_start else None
         d["dense_layers"] = (
@@ -176,7 +147,9 @@ class TrialConfig:
         return d
 
 
-# ── Standalone model helpers ───────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# Model Training & Scoring
+# ════════════════════════════════════════════════════════════════
 
 def train_model(
     model_type: ModelType,
@@ -193,19 +166,13 @@ def train_model(
     patience: int = 10,
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-5,
-    dropout: float = 0.0,
     logger=None,
     ocsvm_nu: float = 0.05,
     ocsvm_gamma: str | float = "scale",
     iforest_contamination: float = 0.05,
-    iforest_n_estimators: int = 100
+    iforest_n_estimators: int = 100,
 ) -> tuple[Any, float]:
-    """
-    Treina qualquer modelo suportado e retorna (model, val_loss).
-
-    Função standalone reutilizável fora do contexto de AutoML.
-    Para OCSVM e IForest, val_loss = 0.0.
-    """
+    """Treina modelo e retorna (model, val_loss)."""
     if model_type == "ocsvm":
         clf = fit_ocsvm(train_df, nu=ocsvm_nu, gamma=ocsvm_gamma)
         return clf, 0.0
@@ -271,23 +238,13 @@ def score_full(
     seq_len: int = 24,
     batch_size: int = 512,
 ) -> tuple[pd.DataFrame, float, np.ndarray]:
-    """
-    Calcula threshold no train_df e aplica sobre full_df.
-
-    Função standalone reutilizável fora do contexto de AutoML.
-
-    Returns:
-        (scores_df, threshold, train_errors)
-        - scores_df: DataFrame com colunas [error, is_anomaly]
-        - threshold: Valor do threshold calculado
-        - train_errors: Array de erros no conjunto de treino
-    """
+    """Calcula threshold e aplica scores."""
     if model_type == "iforest":
         train_errors = compute_isolation_forest_errors(model, train_df)
         threshold = determine_threshold(train_errors, percentile=threshold_percentile)
         scores_df = score_isolation_forest_set(model, full_df, threshold)
         return scores_df, threshold, train_errors
-    
+
     if model_type == "ocsvm":
         train_errors = compute_ocsvm_errors(model, train_df)
         threshold = determine_threshold(train_errors, percentile=threshold_percentile)
@@ -310,17 +267,15 @@ def score_full(
         model, train_df, batch_size=batch_size, device=device
     )
     threshold = determine_threshold(train_errors, percentile=threshold_percentile)
-
-    if threshold <= 0 or np.isnan(threshold):
-        raise ValueError(f"Threshold inválido: {threshold}")
-
     scores_df = score_test_set(
         model, full_df, threshold=threshold, batch_size=batch_size, device=device
     )
     return scores_df, threshold, train_errors
 
 
-# ── Grid builder ───────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# Grid Builder
+# ════════════════════════════════════════════════════════════════
 
 def build_trials(
     equipment_id: str,
@@ -342,17 +297,11 @@ def build_trials(
     ocsvm_gammas: list[str | float] | None = None,
     iforest_contaminations: list[float] | None = None,
     iforest_n_estimators: list[int] | None = None,
-    epochs: int = 200,
-    patience: int = 20,
+    debounce_consecutives: list[int] | None = None,
+    epochs: int = 100,
+    patience: int = 15,
 ) -> list[TrialConfig]:
-    """
-    Gera a grade de TrialConfig para um equipamento.
-    
-    MODO EXTENSIVE GARANTIDO PARA 1-2 DIAS:
-    - Foco em Dense e LSTM (modelos que demoram)
-    - MUITAS combinações de hiperparâmetros
-    - Epochs altos com patience grande (para não parar cedo)
-    """
+    """Gera grade de trials otimizada para 1-2 dias."""
     config = EQUIPMENT_CONFIGS[equipment_id]
     available_presets = (
         list(config.preprocess_presets.keys())
@@ -364,7 +313,6 @@ def build_trials(
     )
 
     if mode == "quick":
-        # Grade mínima para validação rápida (5-30 min)
         _models = models or ["dense", "ocsvm", "iforest"]
         _presets = presets or available_presets[:1]
         _thresholds = thresholds or [95.0]
@@ -381,51 +329,43 @@ def build_trials(
         _gammas = ocsvm_gammas or ["scale"]
         _iforest_conts = iforest_contaminations or [0.05]
         _iforest_trees = iforest_n_estimators or [100]
+        _debounces = debounce_consecutives or [1]
         _epochs, _patience = 20, 5
 
     elif mode == "extensive":
-        # MODO EXTENSIVE: Garantido para 1-2 dias
-        # Estratégia: PRODUTO CARTESIANO em Dense e LSTM (não one-at-a-time)
-        # Isso gera MUITO mais combinações e garante tempo longo
-        
         _models = models or ["dense", "lstm", "ocsvm", "iforest"]
         _presets = presets or available_presets
-        _thresholds = thresholds or [90.0, 92.5, 95.0, 97.5, 99.0, 99.5]  # 6 thresholds
+        _thresholds = thresholds or [95.0, 97.5, 99.0, 99.5]  # Sem 90% (muito FP)
         _val_starts = val_start_dates or default_val_starts
         
-        # Dense: PRODUTO CARTESIANO com seleção inteligente
         _layers = dense_layers or [
             None, (64, 32), (128, 64), (256, 128),
             (64, 32, 16), (128, 64, 32), (256, 128, 64),
-        ]  # 7 arquiteturas
-        _lrs = dense_lrs or [1e-3, 5e-4, 1e-4, 5e-5]  # 4 LRs
-        _batches = batch_sizes or [128, 256, 512]  # 3 batches
-        _weight_decays = weight_decays or [0, 1e-5, 1e-4]  # 3 WDs
-        _dropouts = dropouts or [0.0, 0.1, 0.2]  # 3 dropouts
+        ]
+        _lrs = dense_lrs or [1e-3, 5e-4, 1e-4, 5e-5]
+        _batches = batch_sizes or [128, 256, 512]
+        _weight_decays = weight_decays or [0, 1e-5, 1e-4]
+        _dropouts = dropouts or [0.0, 0.1, 0.2]
         
-        # LSTM: PRODUTO CARTESIANO
-        _seq_lens = seq_lens or [12, 24, 36, 48, 72]  # 5 seq_lens
-        _hidden = lstm_hidden_dims or [32, 64, 96, 128]  # 4 hiddens
-        _nlayers = lstm_num_layers or [1, 2, 3]  # 3 layers
-        _lstm_dropouts = [0.0, 0.1, 0.2]  # 3 dropouts para LSTM
+        _seq_lens = seq_lens or [12, 24, 36, 48, 72]
+        _hidden = lstm_hidden_dims or [32, 64, 96, 128]
+        _nlayers = lstm_num_layers or [1, 2, 3]
+        _lstm_dropouts = [0.0, 0.1, 0.2]
         
-        # OCSVM e IForest: reduzidos (são rápidos)
-        _nus = ocsvm_nus or [0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2]  # 3 nus
-        _gammas = ocsvm_gammas or ["scale", "auto", "0.001", "0.01", "0.1"]  # 3 gammas
-        _iforest_conts = iforest_contaminations or [0.001, 0.005, 0.01, 0.05, 0.1]  # 3 conts
-        _iforest_trees = iforest_n_estimators or [100, 200, 300, 500]  # 2 trees
+        _nus = ocsvm_nus or [0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2]
+        _gammas = ocsvm_gammas or ["scale", "auto", "0.001", "0.01", "0.1"]
+        _iforest_conts = iforest_contaminations or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _iforest_trees = iforest_n_estimators or [100, 200, 300, 500]
+        _debounces = debounce_consecutives or [1, 2, 4, 6, 12]
         
-        # Epochs MUITO ALTOS para garantir duração
-        # Patience alto para não parar cedo
-        _epochs, _patience = epochs * 2, patience * 2
+        _epochs, _patience = 150, 25  # Reduzido de 400/50
 
-    else:  # full (modo padrão, 4-8h)
+    else:  # full
         _models = models or ["dense", "lstm", "ocsvm", "iforest"]
         _presets = presets or available_presets
         _thresholds = thresholds or [90.0, 95.0, 97.5, 99.0]
         _val_starts = val_start_dates or default_val_starts
         
-        # Dense: configurações balanceadas
         _layers = dense_layers or [
             None, (64, 32, 16), (128, 64, 32),
             (256, 128, 64), (128, 64, 32, 16),
@@ -435,43 +375,40 @@ def build_trials(
         _weight_decays = weight_decays or [0, 1e-5]
         _dropouts = dropouts or [0.0, 0.1]
         
-        # LSTM: configurações balanceadas
         _seq_lens = seq_lens or [12, 24, 48]
         _hidden = lstm_hidden_dims or [32, 64, 128]
         _nlayers = lstm_num_layers or [1, 2, 3]
         _lstm_dropouts = [0.0, 0.1]
         
-        # OCSVM: configurações balanceadas
         _nus = ocsvm_nus or [0.005, 0.01, 0.05, 0.1]
         _gammas = ocsvm_gammas or ["scale", "auto", 0.01]
-        
-        # IForest: configurações balanceadas
         _iforest_conts = iforest_contaminations or [0.005, 0.01, 0.05]
         _iforest_trees = iforest_n_estimators or [100, 200, 500]
+        _debounces = debounce_consecutives or [1, 4, 6]
         
         _epochs, _patience = epochs, patience
 
     trials: list[TrialConfig] = []
 
-    for val_start, preset, model, threshold in product(_val_starts, _presets, _models, _thresholds):
+    for val_start, preset, model, threshold, debounce in product(
+        _val_starts, _presets, _models, _thresholds, _debounces
+    ):
         if model == "dense":
-            # PRODUTO CARTESIANO COMPLETO em extensive (garante muitos trials)
             for lr, bs, layers, wd, drop in product(_lrs, _batches, _layers, _weight_decays, _dropouts):
                 trials.append(TrialConfig(
                     val_start=val_start, preset=preset, model=model,
-                    threshold_percentile=threshold,
+                    threshold_percentile=threshold, debounce_consecutive=debounce,
                     learning_rate=lr, batch_size=bs, dense_layers=layers,
                     weight_decay=wd, dropout=drop,
                     epochs=_epochs, patience=_patience,
                 ))
 
         elif model == "lstm":
-            # PRODUTO CARTESIANO COMPLETO em extensive
-            dropout_list = _lstm_dropouts if mode == "extensive" else _dropouts if mode == "full" else [0.0]
+            dropout_list = _lstm_dropouts if mode in ("extensive", "full") else [0.0]
             for sl, hd, nl, drop in product(_seq_lens, _hidden, _nlayers, dropout_list):
                 trials.append(TrialConfig(
                     val_start=val_start, preset=preset, model=model,
-                    threshold_percentile=threshold,
+                    threshold_percentile=threshold, debounce_consecutive=debounce,
                     seq_len=sl, lstm_hidden_dim=hd, lstm_num_layers=nl,
                     dropout=drop, epochs=_epochs, patience=_patience,
                 ))
@@ -480,7 +417,7 @@ def build_trials(
             for nu, gamma in product(_nus, _gammas):
                 trials.append(TrialConfig(
                     val_start=val_start, preset=preset, model=model,
-                    threshold_percentile=threshold,
+                    threshold_percentile=threshold, debounce_consecutive=debounce,
                     ocsvm_nu=nu, ocsvm_gamma=gamma,
                 ))
 
@@ -488,17 +425,16 @@ def build_trials(
             for cont, trees in product(_iforest_conts, _iforest_trees):
                 trials.append(TrialConfig(
                     val_start=val_start, preset=preset, model=model,
-                    threshold_percentile=threshold,
+                    threshold_percentile=threshold, debounce_consecutive=debounce,
                     iforest_contamination=cont, iforest_n_estimators=trees,
                 ))
-                
-        else:
-            raise ValueError(f"Modelo desconhecido: {model}")
 
     return trials
 
 
-# ── Trial runner ───────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# Trial Runner
+# ════════════════════════════════════════════════════════════════
 
 def run_trial(
     trial: TrialConfig,
@@ -510,26 +446,10 @@ def run_trial(
     logger=None,
     trial_idx: int = 0,
 ) -> dict[str, Any] | None:
-    """
-    Executa um trial completo: split → preprocessing → treino → scoring → métricas.
-
-    Args:
-        trial: Configuração do trial
-        equipment_id: ID do equipamento
-        df_pre: Dados PRÉ-split (após pre_split_steps)
-        device: "cuda" ou "cpu"
-        prefailure_days: Janela pré-falha em dias
-        normal_end_days: Fim do período normal (dias antes da falha)
-        logger: Logger do ClearML
-        trial_idx: Índice do trial (para logging)
-
-    Returns:
-        Dict com métricas e objetos (_model, _scores_df, _artifacts) ou None se dados insuficientes
-    """
+    """Executa um trial completo."""
     config = EQUIPMENT_CONFIGS[equipment_id]
     min_rows = max(50, trial.seq_len + 1 if trial.model == "lstm" else 50)
 
-    # 1. SPLIT específico deste trial
     splits = temporal_split(
         df_pre,
         val_start_date=trial.val_start,
@@ -539,7 +459,6 @@ def run_trial(
     if len(splits["train"]) < min_rows or len(splits["val"]) < min_rows:
         return None
 
-    # 2. PREPROCESSING depois do split
     steps = get_preprocessing_steps(equipment_id, preset=trial.preset)
     train_df, artifacts, _ = run_preprocessing(
         splits["train"], steps, return_artifacts=True, return_report=True
@@ -554,16 +473,11 @@ def run_trial(
         return_artifacts=True, return_report=True
     )
 
-    if len(splits["train"]) < min_rows or len(splits["val"]) < min_rows:
-        print(f"  [SKIP] train={len(splits['train'])} val={len(splits['val'])} min={min_rows}")
+    if len(train_df) < min_rows or len(val_df) < min_rows:
         return None
 
-    # 3. TREINO
     model, val_loss = train_model(
-        trial.model,
-        train_df,
-        val_df,
-        device,
+        trial.model, train_df, val_df, device,
         dense_layers=list(trial.dense_layers) if trial.dense_layers else None,
         seq_len=trial.seq_len,
         lstm_hidden_dim=trial.lstm_hidden_dim,
@@ -577,39 +491,37 @@ def run_trial(
         ocsvm_nu=trial.ocsvm_nu,
         ocsvm_gamma=trial.ocsvm_gamma,
         iforest_contamination=trial.iforest_contamination,
-        iforest_n_estimators=trial.iforest_n_estimators,    
+        iforest_n_estimators=trial.iforest_n_estimators,
         logger=logger,
     )
 
-    # 4. SCORING
     scores_df, threshold, train_errors = score_full(
-        model,
-        trial.model,
-        train_df,
-        full_df,
-        trial.threshold_percentile,
-        device,
-        seq_len=trial.seq_len,
-        batch_size=trial.batch_size,
+        model, trial.model, train_df, full_df,
+        trial.threshold_percentile, device,
+        seq_len=trial.seq_len, batch_size=trial.batch_size,
     )
 
     n_anomalies = int(scores_df["is_anomaly"].sum())
     anomaly_rate = float(scores_df["is_anomaly"].mean())
 
-    # 5. MÉTRICAS
+    # MÉTRICAS balanceadas com penalização de FP
     failure_date = getattr(config, "failure_date", None)
-    
+
     if failure_date is not None:
-        metrics = failure_detection_metrics(
+        metrics = compute_balanced_score(
             scores_df,
             failure_date=failure_date,
             prefailure_days=prefailure_days,
             normal_end_days=normal_end_days,
+            false_positive_penalty=2.0,
+            min_prefailure_rate=0.3,
+            debounce_consecutive=trial.debounce_consecutive,
         )
         composite_score = float(metrics["composite_score"])
     else:
         metrics = {
-            "composite_score": anomaly_rate,
+            "composite_score": 1.0 - anomaly_rate,
+            "balanced_score": -anomaly_rate,
             "discrimination_ratio": 0.0,
             "prefailure_alert_rate": 0.0,
             "normal_alert_rate": anomaly_rate,
@@ -617,20 +529,17 @@ def run_trial(
             "n_normal_alerts": n_anomalies,
             "n_prefailure_samples": 0,
             "n_normal_samples": len(scores_df),
+            "false_positive_penalty_used": 2.0,
+            "min_prefailure_rate_used": 0.3,
         }
-        composite_score = anomaly_rate
+        composite_score = 1.0 - anomaly_rate
 
-    # 6. LOGGING
     if logger:
         series = f"automl/{trial.model}"
         logger.report_scalar(series, "val_loss", val_loss, trial_idx)
         logger.report_scalar(series, "composite_score", composite_score, trial_idx)
-        logger.report_scalar(series, "n_anomalies", n_anomalies, trial_idx)
-        logger.report_scalar(series, "discrimination_ratio", float(metrics["discrimination_ratio"]), trial_idx)
-        logger.report_scalar(series, "prefailure_alert_rate", float(metrics["prefailure_alert_rate"]), trial_idx)
         logger.report_scalar(series, "normal_alert_rate", float(metrics["normal_alert_rate"]), trial_idx)
 
-    # 7. RESULTADO
     row = trial.to_dict()
     row.update({
         "trial_label": trial.label(),
@@ -654,211 +563,74 @@ def run_trial(
     return row
 
 
-# ── Ranking ────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# Ranking
+# ════════════════════════════════════════════════════════════════
 
-def rank_results(rows: list[dict[str, Any]]) -> pd.DataFrame:
-    """Ordena trials por composite_score (primário), prefailure_alert_rate, normal_alert_rate."""
-    return (
-        pd.DataFrame(rows)
-        .sort_values(
-            ["composite_score", "prefailure_alert_rate", "normal_alert_rate"],
+def rank_results(rows: list[dict[str, Any]], max_fp_rate: float | None = None) -> pd.DataFrame:
+    """
+    Ordena trials com suporte a constraint de FP.
+    
+    Args:
+        rows: Lista de resultados de trials
+        max_fp_rate: Taxa máxima de FP permitida (0-1). Se None, usa composite_score puro.
+    
+    Returns:
+        DataFrame ordenado
+    """
+    df = pd.DataFrame(rows).reset_index(drop=True)
+
+    if max_fp_rate is not None and max_fp_rate > 0:
+        # CONSTRAINT MODE: apenas modelos com FP <= max_fp_rate
+        viable = df[df["normal_alert_rate"] <= max_fp_rate]
+
+        if len(viable) == 0:
+            # Nenhum satisfaz: retorna ordenado por menor FP
+            print(f"\nAVISO: Nenhum modelo atingiu max_fp_rate={max_fp_rate:.2%}")
+            print("Retornando ordenado por menor taxa de FP...\n")
+            return df.sort_values(
+                ["normal_alert_rate", "prefailure_alert_rate"],
+                ascending=[True, False],
+            ).reset_index(drop=True)
+
+        # Entre viáveis: maximiza pré-falha
+        return viable.sort_values(
+            ["prefailure_alert_rate", "composite_score", "normal_alert_rate"],
             ascending=[False, False, True],
-        )
-        .reset_index(drop=True)
-    )
+        ).reset_index(drop=True)
+
+    # SEM CONSTRAINT: ordenação tradicional
+    return df.sort_values(
+        ["composite_score", "prefailure_alert_rate", "normal_alert_rate"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
 
 
-# ── Relatórios formatados ──────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# Formatting & Display
+# ════════════════════════════════════════════════════════════════
 
 def print_trial_header(trial_num: int, total_trials: int, trial: TrialConfig) -> None:
-    """Imprime cabeçalho de um trial."""
     print(f"\n[{trial_num:03d}/{total_trials:03d}] {trial.label()}")
     print("─" * 70)
 
 
-def print_trial_result(result: dict[str, Any], indent: str = "  ") -> None:
-    """Imprime resultado formatado de um trial."""
-    # — Treino
+def print_trial_result(result: dict[str, Any]) -> None:
+    indent = "  "
     if result.get("val_loss", 0.0) > 0.0:
-        print(f"{indent}Val Loss   : {result['val_loss']:.5f}")
-    print(f"{indent}Threshold  : {result['threshold']:.5f}  "
-          f"(mu={result['train_score_mean']:.5f} +-{result['train_score_std']:.5f})")
-
-    # — Anomalias globais
-    print(f"{indent}Anomalias  : {result['n_anomalies']}/{result['scored_samples']} "
-          f"({result['anomaly_rate']:.2%})")
-
-    # — Metricas de deteccao de falha
-    pre_rate = result.get("prefailure_alert_rate", 0.0)
-    norm_rate = result.get("normal_alert_rate", 0.0)
-    pre_n = result.get("n_prefailure_alerts", 0)
-    pre_total = result.get("n_prefailure_samples", 0)
-    norm_n = result.get("n_normal_alerts", 0)
-    norm_total = result.get("n_normal_samples", 0)
-
-    if pre_total > 0 or norm_total > 0:
-        print(f"{indent}Pre-falha  : {pre_n}/{pre_total} ({pre_rate:.2%})"
-              f"  |  Normal: {norm_n}/{norm_total} ({norm_rate:.2%})")
-
-    ratio = result.get("discrimination_ratio", 0.0)
-    if ratio > 0:
-        print(f"{indent}Ratio Disc.: {ratio:.3f}")
-
-    # — Score composto (sempre por ultimo, e o primario)
-    print(f"{indent}Score      : {result['composite_score']:.5f}")
+        print(f"{indent}Val Loss: {result['val_loss']:.5f}")
+    print(f"{indent}Threshold: {result['threshold']:.5f}")
+    print(f"{indent}Anomalias: {result['n_anomalies']}/{result['scored_samples']} ({result['anomaly_rate']:.2%})")
+    
+    pre = result.get("prefailure_alert_rate", 0.0)
+    norm = result.get("normal_alert_rate", 0.0)
+    print(f"{indent}Pre-falha: {pre:.2%}  |  Normal: {norm:.2%}")
+    print(f"{indent}Score: {result['composite_score']:.5f}")
 
 
-def print_final_summary(
-    equipment_id: str,
-    mode: ModeType,
-    n_total_trials: int,
-    n_successful: int,
-    n_failed: int,
-    n_skipped: int,
-    best_result: dict[str, Any],
-    duration_seconds: float,
-) -> None:
-    """Imprime resumo final da execução do AutoML."""
-    print("\n" + "=" * 70)
-    print(f"{'RESUMO FINAL':^70}")
-    print("=" * 70)
-    print(f"Equipamento: {equipment_id}")
-    print(f"Modo: {mode}")
-    print(f"Trials executados: {n_successful}/{n_total_trials} bem-sucedidos")
-    print(f"Falhas: {n_failed}")
-    print(f"Pulados: {n_skipped}")
-    print(f"Duração: {duration_seconds / 60:.1f} min ({duration_seconds / 3600:.1f} h)")
-    print()
-    print("MELHOR CONFIGURAÇÃO:")
-    print(f"Modelo: {best_result['model']}")
-    print(f"Preset: {best_result['preset']}")
-    print(f"Val Start: {best_result.get('val_start') or 'auto'}")
-    print(f"Score: {best_result['composite_score']:.5f}")
-    print(f"Val Loss: {best_result['val_loss']:.5f}")
-    print(f"Threshold: {best_result['threshold']:.5f}")
-    print(f"Anomalias: {best_result['n_anomalies']}/{best_result['scored_samples']}")
-    print("=" * 70 + "\n")
-
-
-def print_ranking_table(ranking: pd.DataFrame, top_n: int = 10) -> None:
-    """
-    Imprime tabela final de resultados com duas seções:
-    - Top-N geral (todos os modelos, ordenado por composite_score)
-    - Top-3 por modelo (melhor de cada tipo)
-    """
-    W = 100
-
-    # Colunas base sempre presentes
-    base_cols = [
-        "model", "preset", "val_start",
-        "composite_score", "prefailure_alert_rate", "normal_alert_rate",
-        "discrimination_ratio", "val_loss", "threshold",
-        "n_anomalies", "scored_samples",
-    ]
-    cols = [c for c in base_cols if c in ranking.columns]
-
-    def _fmt(df: pd.DataFrame) -> pd.DataFrame:
-        out = df[cols].copy()
-        for c in ("composite_score", "prefailure_alert_rate", "normal_alert_rate", "val_loss", "threshold"):
-            if c in out:
-                out[c] = out[c].apply(lambda v: f"{v:.4f}")
-        if "discrimination_ratio" in out:
-            out["discrimination_ratio"] = out["discrimination_ratio"].apply(lambda v: f"{v:.2f}")
-        if "val_start" in out:
-            out["val_start"] = out["val_start"].fillna("auto")
-        return out
-
-    # ── Top-N geral ───────────────────────────────────────────────
-    print("\n" + "=" * W)
-    print(f"{'RANKING FINAL — TOP ' + str(top_n) + ' GERAL':^{W}}")
-    print("=" * W)
-    print(_fmt(ranking.head(top_n)).to_string(index=True))
-
-    # ── Top-3 por modelo ──────────────────────────────────────────
-    if "model" in ranking.columns:
-        print("\n" + "=" * W)
-        print(f"{'RANKING POR MODELO — TOP 3 DE CADA':^{W}}")
-        print("=" * W)
-
-        for model_type in sorted(ranking["model"].unique()):
-            subset = ranking[ranking["model"] == model_type].head(3)
-            print(f"\n  [{model_type.upper()}]")
-            print("  " + "-" * (W - 2))
-            print(_fmt(subset).to_string(index=True).replace("\n", "\n  "))
-
-    print("\n" + "=" * W + "\n")
-
-
-# ── Salvamento de artifacts ────────────────────────────────────────────────────
-
-def save_artifacts(
-    best_row: dict[str, Any],
-    ranking: pd.DataFrame,
-    equipment_id: str,
-    output_dir: Path,
-    task: Task,
-    upload_to_clearml: bool = True,
-) -> None:
-    """
-    Salva todos os artifacts localmente e opcionalmente faz upload ao ClearML.
-
-    Args:
-        best_row: Dict do melhor trial (deve conter _model, _scores_df, _artifacts)
-        ranking: DataFrame com ranking de todos os trials
-        equipment_id: ID do equipamento
-        output_dir: Diretório de saída local
-        task: Task do ClearML
-        upload_to_clearml: Se True, faz upload ao ClearML
-    """
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    model = best_row["_model"]
-    model_type = best_row["model"]
-
-    if model_type in ["ocsvm", "iforest"]:
-        model_path = output_dir / f"best_model_{equipment_id}.pkl"
-        with model_path.open("wb") as f:
-            pickle.dump(model, f)
-    else:
-        model_path = output_dir / f"best_model_{equipment_id}.pt"
-        torch.save(model.state_dict(), model_path)
-
-    print(f"  Modelo salvo: {model_path}")
-
-    scores_path = output_dir / "best_full_scores.parquet"
-    best_row["_scores_df"].to_parquet(scores_path)
-    print(f"  Scores salvos: {scores_path}")
-
-    ranking_path = output_dir / "automl_ranking.parquet"
-    ranking.to_parquet(ranking_path)
-    print(f"  Ranking salvo: {ranking_path}")
-
-    if "_artifacts" in best_row:
-        artifacts_path = output_dir / "preprocessing_artifacts.pkl"
-        with artifacts_path.open("wb") as f:
-            pickle.dump(best_row["_artifacts"], f)
-        print(f"  Artifacts salvos: {artifacts_path}")
-
-    summary = {k: v for k, v in best_row.items() if not k.startswith("_")}
-    summary_path = output_dir / "best_trial_summary.json"
-    with summary_path.open("w") as f:
-        json.dump(summary, f, indent=2, default=str)
-    print(f"  Summary salvo: {summary_path}")
-
-    if upload_to_clearml:
-        print("  Fazendo upload ao ClearML...")
-        task.upload_artifact("best_model", artifact_object=model_path)
-        task.upload_artifact("best_full_scores", artifact_object=best_row["_scores_df"])
-        task.upload_artifact("automl_results", artifact_object=ranking)
-        task.upload_artifact("best_trial", artifact_object={"results": summary})
-
-        if "_artifacts" in best_row:
-            task.upload_artifact("preprocessing_artifacts", artifact_object=best_row["_artifacts"])
-
-        print("  ✓ Upload completo")
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# Main
+# ════════════════════════════════════════════════════════════════
 
 def main(
     equipment_id: str,
@@ -869,129 +641,59 @@ def main(
     upload_to_clearml: bool = True,
     local_artifacts_dir: str = "artifacts_local",
     models: list[str] | None = None,
-    epochs: int = 200,
-    patience: int = 20,
+    epochs: int = 100,
+    patience: int = 15,
     prefailure_days: int = 30,
     normal_end_days: int = 60,
+    max_fp_rate: float | None = None,
+    clearml_project=None
 ) -> None:
-    """
-    Pipeline principal do AutoML.
-
-    Etapas:
-    1. Setup: ClearML, device, configuração
-    2. Data Loading: carrega e pré-processa dados
-    3. Trial Generation: monta grade de busca
-    4. Execution: executa trials (cada trial faz seu próprio split + preprocessing)
-    5. Reporting: salva resultados e artifacts
-    """
+    """Pipeline principal do AutoML."""
     start_time = time.time()
-
-    # ══════════════════════════════════════════════════════════════
-    # ETAPA 1: SETUP
-    # ══════════════════════════════════════════════════════════════
-
     config = EQUIPMENT_CONFIGS[equipment_id]
 
     print("=" * 70)
-    print(f"{'AUTOML - DETECÇÃO DE ANOMALIAS':^70}")
+    print(f"{'AUTOML - DETECÇÃO DE ANOMALIAS (OTIMIZADO)':^70}")
     print("=" * 70)
     print(f"Equipamento: {equipment_id}")
     print(f"Modo       : {mode}")
-    print(f"Remote     : {remote}")
+    print(f"Max FP Rate: {max_fp_rate:.2%}" if max_fp_rate else "Max FP Rate: ∞ (sem constraint)")
     print("=" * 70 + "\n")
 
     Task.add_requirements("pyarrow")
     Task.add_requirements("torch", package_version="")
 
-    task_name = f"automl_{equipment_id}_{mode}"
-
     task = Task.init(
-        project_name="Transpetro",
-        task_name=task_name,
+        project_name=clearml_project,
+        task_name=f"automl_{equipment_id}_{mode}",
         output_uri=True,
     )
-    task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
-
-    hparams = {
-        "equipment_id": equipment_id,
-        "mode": mode,
-        "models": models or ["dense", "lstm", "ocsvm", "iforest"],
-        "epochs": epochs,
-        "patience": patience,
-        "prefailure_days": prefailure_days,
-        "normal_end_days": normal_end_days,
-        "upload_to_clearml": upload_to_clearml,
-        "failure_date": str(getattr(config, "failure_date", None)),
-    }
-    task.connect(hparams)
 
     if remote:
-        print(f"Executando remotamente na fila: {queue}")
         task.execute_remotely(queue_name=queue)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger = task.get_logger()
+    print(f"Device: {device}\n")
 
-    print(f"Device: {device}")
-    print(f"ClearML Task ID: {task.id}\n")
-
-    # ══════════════════════════════════════════════════════════════
-    # ETAPA 2: DATA LOADING
-    # ══════════════════════════════════════════════════════════════
-
-    print("ETAPA 2: Carregando dados...")
+    # LOAD DATA
+    print("Carregando dados...")
     df_raw = load_equipment_data(equipment_id, from_clearml=not local_data)
-    print(f"  Shape inicial: {df_raw.shape}")
-    print(f"  Período: {df_raw.index.min()} até {df_raw.index.max()}")
+    df_pre, _, _ = run_preprocessing(df_raw, config.pre_split_steps)
+    print(f"  Shape: {df_pre.shape}\n")
 
-    # Aplica apenas pre_split_steps (se existir)
-    if getattr(config, "pre_split_steps", None):
-        print("  Aplicando pré-split preprocessing...")
-        df_pre, _, _ = run_preprocessing(df_raw, config.pre_split_steps)
-        print(f"  Shape pós pré-split: {df_pre.shape}")
-    else:
-        df_pre = df_raw
+    # BUILD TRIALS
+    print("Gerando grid de trials...")
+    trials = build_trials(equipment_id, mode=mode, models=models, epochs=epochs, patience=patience)
+    print(f"  Total: {len(trials)} trials\n")
 
-    # ══════════════════════════════════════════════════════════════
-    # ETAPA 3: TRIAL GENERATION
-    # ══════════════════════════════════════════════════════════════
-
-    print("\nETAPA 3: Gerando grid de trials...")
-    trials = build_trials(
-        equipment_id=equipment_id,
-        mode=mode,
-        models=hparams["models"],
-        epochs=epochs,
-        patience=patience,
-    )
-    print(f"  Total de trials: {len(trials)}")
-
-    model_counts: dict[str, int] = {}
-    for trial in trials:
-        model_counts[trial.model] = model_counts.get(trial.model, 0) + 1
-
-    for model_type, count in sorted(model_counts.items()):
-        print(f"    {model_type:8s}: {count:4d} trials")
-
-    # Estimativa de tempo
-    if mode == "quick":
-        est_time = "5-30 minutos"
-    elif mode == "extensive":
-        est_time = "1-2 dias"
-    else:
-        est_time = "4-8 horas"
-    print(f"\n  Tempo estimado: {est_time}")
-
-    # ══════════════════════════════════════════════════════════════
-    # ETAPA 4: EXECUTION
-    # ══════════════════════════════════════════════════════════════
-
-    print("\n" + "=" * 70)
-    print(f"{'EXECUÇÃO DE TRIALS':^70}")
+    # EXECUTE
+    print("=" * 70)
+    print(f"{'EXECUÇÃO':^70}")
     print("=" * 70)
 
     rows: list[dict] = []
-    best_row: dict | None = None
+    best_row = None
     n_skipped = 0
     n_failed = 0
 
@@ -1000,181 +702,88 @@ def main(
 
         try:
             row = run_trial(
-                trial=trial,
-                equipment_id=equipment_id,
-                df_pre=df_pre,  # Passa dados PRÉ-split
-                device=device,
-                prefailure_days=prefailure_days,
-                normal_end_days=normal_end_days,
-                logger=logger,
-                trial_idx=i,
+                trial, equipment_id, df_pre, device,
+                prefailure_days, normal_end_days, logger, i
             )
 
+            if row is None:
+                print("[SKIP] Dados insuficientes")
+                n_skipped += 1
+                continue
+
+            print_trial_result(row)
+            
+            # Atualiza melhor (respeitando constraint de FP)
+            should_update = False
+            if best_row is None:
+                should_update = max_fp_rate is None or row["normal_alert_rate"] <= max_fp_rate
+            else:
+                if max_fp_rate is None:
+                    should_update = row["composite_score"] > best_row["composite_score"]
+                else:
+                    row_fp_ok = row["normal_alert_rate"] <= max_fp_rate
+                    best_fp_ok = best_row["normal_alert_rate"] <= max_fp_rate
+                    
+                    if row_fp_ok and best_fp_ok:
+                        should_update = row["prefailure_alert_rate"] > best_row["prefailure_alert_rate"]
+                    elif row_fp_ok and not best_fp_ok:
+                        should_update = True
+
+            if should_update:
+                if best_row is not None:
+                    best_row.pop("_model", None)
+                    best_row.pop("_scores_df", None)
+                    best_row.pop("_artifacts", None)
+                best_row = row
+            else:
+                row.pop("_model", None)
+                row.pop("_scores_df", None)
+                row.pop("_artifacts", None)
+
+            rows.append({k: v for k, v in row.items() if not k.startswith("_")})
+
         except Exception as e:
-            print(f"  [ERRO] {type(e).__name__}: {e}")
+            print(f"  [ERRO] {e}")
             n_failed += 1
-            continue
-
-        if row is None:
-            print("  [SKIP] Dados insuficientes")
-            n_skipped += 1
-            continue
-
-        print_trial_result(row)
-
-        # Mantém apenas o melhor modelo na memória
-        if best_row is None or row["composite_score"] > best_row["composite_score"]:
-            if best_row is not None:
-                best_row.pop("_model", None)
-                best_row.pop("_scores_df", None)
-                best_row.pop("_artifacts", None)
-            best_row = row
-        else:
-            row.pop("_model", None)
-            row.pop("_scores_df", None)
-            row.pop("_artifacts", None)
-
-        rows.append({k: v for k, v in row.items() if not k.startswith("_")})
 
     if best_row is None:
         raise RuntimeError("Todos os trials falharam.")
 
-    # ══════════════════════════════════════════════════════════════
-    # ETAPA 5: REPORTING
-    # ══════════════════════════════════════════════════════════════
-
+    # RESULTS
     print("\n" + "=" * 70)
-    print(f"{'SALVANDO RESULTADOS':^70}")
+    print(f"{'RESULTADOS':^70}")
     print("=" * 70)
 
-    ranking = rank_results(rows)
-
-    print_ranking_table(ranking)
-
-    output_dir = Path(local_artifacts_dir) / f"{task.id}_{equipment_id}"
-    save_artifacts(
-        best_row=best_row,
-        ranking=ranking,
-        equipment_id=equipment_id,
-        output_dir=output_dir,
-        task=task,
-        upload_to_clearml=upload_to_clearml,
-    )
-
-    logger.report_scalar("best", "composite_score", best_row["composite_score"], 0)
-    logger.report_scalar("best", "val_loss", best_row["val_loss"], 0)
-    logger.report_scalar("best", "threshold", best_row["threshold"], 0)
-    logger.report_scalar("best", "n_anomalies", best_row["n_anomalies"], 0)
+    ranking = rank_results(rows, max_fp_rate=max_fp_rate)
+    print("\nTOP 10:\n")
+    print(ranking[[c for c in ["composite_score", "prefailure_alert_rate", "normal_alert_rate", "model"] 
+                   if c in ranking.columns]].head(10).to_string())
 
     duration = time.time() - start_time
-    n_successful = len(rows)
+    print(f"\n{'=' * 70}")
+    print(f"Duração: {duration / 3600:.1f}h | Trials: {len(rows)}/{len(trials)} | "
+          f"Falhas: {n_failed} | Pulados: {n_skipped}")
+    print(f"{'=' * 70}\n")
 
-    print_final_summary(
-        equipment_id=equipment_id,
-        mode=mode,
-        n_total_trials=len(trials),
-        n_successful=n_successful,
-        n_failed=n_failed,
-        n_skipped=n_skipped,
-        best_result=best_row,
-        duration_seconds=duration,
-    )
-
-    print(f"\nArtifacts salvos em: {output_dir}")
-    if upload_to_clearml:
-        print(f"Artifacts também enviados ao ClearML (Task ID: {task.id})")
-
-
-# ── CLI ────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="AutoML para detecção de anomalias",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Exemplos de uso:
-
-  # Teste rápido local (5-30 min)
-  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --mode quick
-
-  # Execução completa local (4-8h)
-  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --local-data --mode full
-
-  # Execução extensiva remota (1-2 dias) - GARANTIDO!
-  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --remote --queue gpu --mode extensive
-
-  # Custom: apenas Dense e OCSVM
-  python scripts/automl_anomaly_v3.py --equipment MEQ-01 --models dense ocsvm --mode full
-        """,
-    )
-
+    parser = argparse.ArgumentParser(description="AutoML para detecção de anomalias (OTIMIZADO)")
+    parser.add_argument("--equipment", required=True, choices=list(EQUIPMENT_CONFIGS.keys()))
+    parser.add_argument("--mode", choices=["quick", "full", "extensive"], default="full")
+    parser.add_argument("--remote", action="store_true")
+    parser.add_argument("--queue", default="default")
+    parser.add_argument("--local-data", action="store_true")
+    parser.add_argument("--no-clearml-upload", action="store_true")
+    parser.add_argument("--local-artifacts-dir", default="artifacts_local")
+    parser.add_argument("--models", nargs="+", default=None, choices=["dense", "lstm", "ocsvm", "iforest"])
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--patience", type=int, default=15)
+    parser.add_argument("--prefailure-days", type=int, default=30)
+    parser.add_argument("--normal-end-days", type=int, default=60)
+    parser.add_argument("--clearml-project", default="Transpetro")
     parser.add_argument(
-        "--equipment",
-        required=True,
-        choices=list(EQUIPMENT_CONFIGS.keys()),
-        help="ID do equipamento a treinar",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["quick", "full", "extensive"],
-        default="full",
-        help="Modo de execução: quick (5-30min), full (4-8h), extensive (1-2 dias GARANTIDO)",
-    )
-    parser.add_argument(
-        "--remote",
-        action="store_true",
-        help="Executa remotamente no ClearML",
-    )
-    parser.add_argument(
-        "--queue",
-        default="default",
-        help="Fila ClearML para execução remota (default: default)",
-    )
-    parser.add_argument(
-        "--local-data",
-        action="store_true",
-        help="Carrega dados locais em vez do ClearML Dataset",
-    )
-    parser.add_argument(
-        "--no-clearml-upload",
-        action="store_true",
-        help="Desabilita upload de artifacts ao ClearML",
-    )
-    parser.add_argument(
-        "--local-artifacts-dir",
-        default="artifacts_local",
-        help="Diretório para artifacts locais (default: artifacts_local)",
-    )
-    parser.add_argument(
-        "--models",
-        nargs="+",
-        default=None,
-        choices=["dense", "lstm", "ocsvm", "iforest"],
-        help="Modelos a incluir (padrão: todos)",
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=200,
-        help="Número de epochs de treino (default: 200, extensive usa 500)",
-    )
-    parser.add_argument(
-        "--patience",
-        type=int,
-        default=20,
-        help="Early stopping patience (default: 20, extensive usa 50)",
-    )
-    parser.add_argument(
-        "--prefailure-days",
-        type=int,
-        default=30,
-        help="Dias antes da falha que compõem a janela pré-falha (default: 30)",
-    )
-    parser.add_argument(
-        "--normal-end-days",
-        type=int,
-        default=60,
-        help="Dias antes da falha onde termina o período normal (default: 60)",
+        "--max-fp-rate", type=float, default=0.0,
+        help="Taxa máxima de FP permitida (0-1). Use 0 para desabilitar constraint."
     )
 
     args = parser.parse_args()
@@ -1192,4 +801,6 @@ Exemplos de uso:
         patience=args.patience,
         prefailure_days=args.prefailure_days,
         normal_end_days=args.normal_end_days,
+        max_fp_rate=args.max_fp_rate if args.max_fp_rate > 0 else None,
+        clearml_project=args.clearml_project
     )

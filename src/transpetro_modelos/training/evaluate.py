@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.ensemble import IsolationForest
+from typing import Any
 
 from transpetro_modelos.training.train import make_windows
 
@@ -134,7 +135,7 @@ def compute_reconstruction_errors(
 
     return np.array(errors)
 
-def failure_detection_metrics(
+'''def failure_detection_metrics(
     scores: pd.DataFrame,
     failure_date: datetime,
     prefailure_days: int = 30,
@@ -175,7 +176,120 @@ def failure_detection_metrics(
         "n_normal_alerts": int(normal_flags.sum()),
         "n_prefailure_samples": len(prefailure_flags),
         "n_normal_samples": len(normal_flags),
+    }'''
+
+def apply_debounce(scores: pd.DataFrame, consecutive: int = 1) -> pd.DataFrame:
+    """
+    Exige N pontos consecutivos anômalos antes de disparar um alarme.
+
+    consecutive=1 equivale a nenhum debounce (comportamento original).
+    Para dados em 5 min, consecutive=6 exige 30 min contínuos.
+    Para dados horários, consecutive=6 exige 6 horas contínuas.
+
+    O alarme é atribuído ao último ponto da sequência; pontos anteriores
+    ao tamanho da janela ficam como False.
+    """
+    if consecutive <= 1:
+        return scores
+    rolling_count = scores["is_anomaly"].astype(int).rolling(consecutive, min_periods=consecutive).sum()
+    debounced = (rolling_count >= consecutive).fillna(False)
+    result = scores.copy()
+    result["is_anomaly"] = debounced
+    return result
+
+
+def compute_balanced_score(
+    scores_df: pd.DataFrame,
+    failure_date: datetime,
+    prefailure_days: int = 30,
+    normal_end_days: int = 60,
+    *,
+    false_positive_penalty: float = 2.0,
+    min_prefailure_rate: float = 0.5,
+    debounce_consecutive: int = 1,
+) -> dict[str, Any]:
+    """
+    Calcula score balanceado que penaliza explicitamente falsos positivos.
+
+    Lógica central:
+        balanced_score = prefailure_alert_rate - (false_positive_penalty × normal_alert_rate)
+
+    Isso garante que modelos com alta taxa de FP no período normal sejam
+    rebaixados no ranking mesmo que também detectem bem o pré-falha.
+
+    Args:
+        scores_df: DataFrame com coluna 'is_anomaly' e índice temporal.
+        failure_date: Data conhecida da falha do equipamento.
+        prefailure_days: Tamanho da janela pré-falha em dias.
+        normal_end_days: Quantos dias antes da falha o período "normal" termina.
+            Ex: 60 → considera normal apenas amostras com >60 dias antes da falha.
+        false_positive_penalty: Fator de penalização para alertas no período normal.
+            Valor 2.0 significa que cada 1% de FP "custa" 2% no score final.
+        min_prefailure_rate: Taxa mínima desejada de detecção pré-falha.
+            Modelos abaixo desse patamar recebem penalização adicional.
+
+    Returns:
+        Dict com composite_score (0-1), balanced_score, discrimination_ratio,
+        taxas de alerta por período e contagens absolutas.
+    """
+
+    if debounce_consecutive > 1:
+        scores_df = apply_debounce(scores_df, consecutive=debounce_consecutive)
+
+    # Definir janelas temporais
+    prefailure_start = failure_date - pd.Timedelta(days=prefailure_days)
+    normal_end = failure_date - pd.Timedelta(days=normal_end_days)
+
+    # Período normal: amostras com mais de normal_end_days antes da falha
+    normal_mask = scores_df.index < normal_end
+    normal_samples = scores_df[normal_mask]
+    n_normal = len(normal_samples)
+    n_normal_alerts = int(normal_samples["is_anomaly"].sum())
+    normal_alert_rate = float(normal_samples["is_anomaly"].mean()) if n_normal > 0 else 0.0
+
+    # Período pré-falha: últimos prefailure_days antes da falha
+    prefailure_mask = (scores_df.index >= prefailure_start) & (scores_df.index < failure_date)
+    prefailure_samples = scores_df[prefailure_mask]
+    n_prefailure = len(prefailure_samples)
+    n_prefailure_alerts = int(prefailure_samples["is_anomaly"].sum())
+    prefailure_alert_rate = float(prefailure_samples["is_anomaly"].mean()) if n_prefailure > 0 else 0.0
+
+    # Discrimination ratio: quantas vezes mais alerta pré-falha vs normal
+    if normal_alert_rate > 0:
+        discrimination_ratio = prefailure_alert_rate / normal_alert_rate
+    else:
+        discrimination_ratio = float("inf") if prefailure_alert_rate > 0 else 1.0
+
+    # Score balanceado: alta detecção pré-falha + baixos FP normais
+    # Melhor caso: prefailure=1.0, normal=0.0 → balanced_score = 1.0
+    # Pior caso:  prefailure=0.0, normal=0.5 → balanced_score = -1.0
+    balanced_score = (prefailure_alert_rate - false_positive_penalty * (normal_alert_rate ** 2))
+
+    # Penalização adicional se não atingir detecção mínima pré-falha
+    if prefailure_alert_rate < min_prefailure_rate:
+        penalty = (min_prefailure_rate - prefailure_alert_rate) * 2.0
+        balanced_score -= penalty
+
+    # Normalizar para [0, 1]
+    composite_score = max(
+        0.0,
+        min(1.0, (balanced_score + false_positive_penalty) / (1.0 + false_positive_penalty))
+    )
+
+    return {
+        "composite_score": composite_score,
+        "balanced_score": balanced_score,
+        "discrimination_ratio": discrimination_ratio,
+        "prefailure_alert_rate": prefailure_alert_rate,
+        "normal_alert_rate": normal_alert_rate,
+        "n_prefailure_alerts": n_prefailure_alerts,
+        "n_normal_alerts": n_normal_alerts,
+        "n_prefailure_samples": n_prefailure,
+        "n_normal_samples": n_normal,
+        "false_positive_penalty_used": false_positive_penalty,
+        "debounce_consecutive": debounce_consecutive,
     }
+
 
 def determine_threshold(train_errors: np.ndarray, percentile: float = 95.0) -> float:
     """Threshold = percentile of training reconstruction errors."""

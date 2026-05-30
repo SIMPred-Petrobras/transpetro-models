@@ -30,12 +30,12 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
         {"step": "interpolate", "method": "time", "limit": 4},
         *COMMUM_PREPROCESSING_STEPS,
         {"step": "clip"},
-        {"step": "normalize", "method": "standard"},
+        {"step": "normalize", "method": "robust"},
     ],
 
     "baseline_interpolated": [
         {"step": "clip"},
-        {"step": "normalize", "method": "standard"},
+        {"step": "normalize", "method": "robust"},
     ],
 
     "knn_raw": [
@@ -43,13 +43,13 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
         *COMMUM_PREPROCESSING_STEPS,
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "clip"},
-        {"step": "normalize", "method": "standard"},
+        {"step": "normalize", "method": "robust"},
     ],
 
     "knn_interpolated": [
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "clip"},
-        {"step": "normalize", "method": "standard"},
+        {"step": "normalize", "method": "robust"},
     ],
 
     "moving_average_raw": [
@@ -57,13 +57,13 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
         *COMMUM_PREPROCESSING_STEPS,
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
-        {"step": "normalize", "method": "standard"},
+        {"step": "normalize", "method": "robust"},
     ],
 
     "moving_average_interpolated": [
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
-        {"step": "normalize", "method": "standard"},
+        {"step": "normalize", "method": "robust"},
     ],
 }
 
@@ -111,7 +111,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         val_end_date=datetime(2024, 8, 20),
         pre_split_steps=[
             {"step": "filter_running", "column": "Corrente", "threshold": 30},
-            {"step": "remove_transients", "minutes": 10},
+            {"step": "remove_transients", "minutes": 10, "gap_minutes": 30},
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
         preprocess_presets=INTERPOLATED_PRESETS,
