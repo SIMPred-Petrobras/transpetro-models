@@ -135,6 +135,12 @@ def run_grid_search(args: argparse.Namespace):
 
     config = EQUIPMENT_CONFIGS[args.equipment]
 
+    # Resolve janelas de avaliação: CLI explícito > config do equipamento > default global.
+    if args.prefailure_days is None:
+        args.prefailure_days = config.prefailure_days if config.prefailure_days is not None else 30
+    if args.normal_end_days is None:
+        args.normal_end_days = config.normal_end_days if config.normal_end_days is not None else 60
+
     trials = build_trials(
         args.equipment,
         presets=args.presets or None,
@@ -154,6 +160,7 @@ def run_grid_search(args: argparse.Namespace):
         if_contamination_list=_parse_floats(args.if_contaminations, []) or None,
         lof_n_neighbors_list=_parse_ints(args.lof_n_neighbors, []) or None,
         lof_contamination_list=_parse_floats(args.lof_contaminations, []) or None,
+        alarm_policies=args.alarm_policies or None,
         epochs=args.epochs if args.epochs is not None else 100,
         patience=args.patience if args.patience is not None else 10,
         quick=args.quick,
@@ -166,6 +173,20 @@ def run_grid_search(args: argparse.Namespace):
     df_raw = load_equipment_data(args.equipment, from_clearml=not args.local_data)
     df_pre, _, _ = run_preprocessing(df_raw, config.pre_split_steps)
     print(f"  Após pré-split: {df_pre.shape}")
+
+    # Guarda contra janela normal vazia: se normal_end cair antes do início dos dados,
+    # normal_alert_rate=0 para todos os trials e a constraint --max-fp-rate fica inativa.
+    normal_end_ts = pd.Timestamp(config.failure_date) - pd.Timedelta(days=args.normal_end_days)
+    n_normal = int((df_pre.index < normal_end_ts).sum())
+    print(f"  Janelas de avaliação: prefailure_days={args.prefailure_days}  normal_end_days={args.normal_end_days}")
+    if n_normal == 0:
+        print(
+            f"  [AVISO] Janela normal VAZIA: normal_end={normal_end_ts.date()} é anterior ao "
+            f"início dos dados ({df_pre.index.min().date()}). normal_alert_rate=0 para todos os "
+            f"trials e a constraint --max-fp-rate NÃO terá efeito. Reduza --normal-end-days."
+        )
+    else:
+        print(f"  Amostras na janela normal (< {normal_end_ts.date()}): {n_normal}")
     print(f"\nTotal de trials: {len(trials)}\n")
 
     # Constraint hard de falso positivo: só considera "melhor" trial com FP <= max_fp_rate.
@@ -345,10 +366,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Percentis do threshold, ex: 90 95 97.5 99 ou '90,95'")
     parser.add_argument("--val-start-dates", nargs="+", default=None,
                         help="Datas de início da validação (YYYY-MM-DD)")
-    parser.add_argument("--prefailure-days", type=int, default=30,
-                        help="Dias antes da falha que compõem a janela pré-falha (default: 30)")
-    parser.add_argument("--normal-end-days", type=int, default=60,
-                        help="Dias antes da falha onde termina o período normal (default: 60)")
+    parser.add_argument("--prefailure-days", type=int, default=None,
+                        help="Dias antes da falha que compõem a janela pré-falha "
+                             "(default: config.prefailure_days do equipamento, senão 30)")
+    parser.add_argument("--normal-end-days", type=int, default=None,
+                        help="Dias antes da falha onde termina o período normal "
+                             "(default: config.normal_end_days do equipamento, senão 60)")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--patience", type=int, default=None)
     parser.add_argument("--learning-rates", nargs="+", default=None)
@@ -379,6 +402,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clearml-project", default="Transpetro")
     parser.add_argument("--clearml-task-name", default=None,
                         help="Nome da task ClearML (default: automl-anomaly-<equipment>)")
+    parser.add_argument("--alarm-policies", nargs="+", choices=["threshold", "cusum"], default=None,
+                        help="Política(s) de alarme: threshold (percentil, default) e/ou cusum (deriva "
+                             "sustentada). Ao usar cusum, restrinja --thresholds (o CUSUM ignora o percentil).")
     parser.add_argument("--max-fp-rate", type=float, default=0.01,
                         help="Constraint máxima de falso positivo no período normal (default: 0.01 = 1%%). "
                              "Use 0 para desabilitar e usar composite_score puro.")

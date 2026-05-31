@@ -10,6 +10,7 @@ class PreprocessingArtifacts:
     scaler: object | None = None
     clip_bounds: dict | None = None
     knn_imputer: KNNImputer | None = None
+    load_residual_coefs: dict | None = None  # {col: (intercept, slope)} de Temp~carga, ajustado no train
 
 
 @dataclass
@@ -123,14 +124,39 @@ def remove_sensor_errors(df: pd.DataFrame, error_values: list[float] | None = No
     return df
 
 
-def resample(df: pd.DataFrame, freq: str = "1h") -> pd.DataFrame:
+def resample(
+    df: pd.DataFrame,
+    freq: str = "1h",
+    agg: str = "last",
+    extra_aggs: dict | None = None,
+) -> pd.DataFrame:
     """
     Resample COV (change-on-value) time series to a regular grid.
-    Uses .last() to preserve the last recorded value in each window.
+
+    agg : agregação base por coluna. 'last' (default) preserva o comportamento original
+        (último valor reportado na janela), adequado para série COV.
+    extra_aggs : opcional, {coluna: [aggs]} — ADICIONA colunas `{coluna}__{agg}` computadas
+        sobre a janela de resample, sem remover as originais. Útil para recuperar o PICO de
+        vibração que o 'last' descarta. aggs suportados: 'max', 'min', 'mean', 'std', 'rms'.
+        Default None → comportamento original 100% inalterado (mudança opt-in).
+
     NaN filling is intentionally NOT done here — use the ffill step after split
     to avoid data leakage between train and test sets.
     """
-    return df.resample(freq).last()
+    r = df.resample(freq)
+    base = r.last() if agg == "last" else getattr(r, agg)()
+    if not extra_aggs:
+        return base
+    out = base.copy()
+    for col, aggs in extra_aggs.items():
+        if col not in df.columns:
+            continue
+        for a in aggs:
+            if a == "rms":
+                out[f"{col}__rms"] = np.sqrt((df[col] ** 2).resample(freq).mean())
+            else:
+                out[f"{col}__{a}"] = getattr(df[col].resample(freq), a)()
+    return out
 
 
 def ffill(df: pd.DataFrame, limit: int = 4) -> pd.DataFrame:
@@ -220,6 +246,46 @@ def add_rolling_features(
     return df.dropna()
 
 
+def add_load_residual(
+    df: pd.DataFrame,
+    temp_columns: list[str],
+    load_column: str = "Corrente",
+    replace: bool = False,
+    coefs: dict | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Adiciona (ou substitui) features de RESÍDUO de temperatura condicionado à carga:
+    resid = Temp - (a + b * carga), com (a, b) de uma regressão linear simples Temp~carga.
+
+    Captura "mancal mais quente do que a carga explica" — a assinatura de roçamento/desgaste —
+    sendo INVARIANTE a trocas de regime de carga (que mudam Temp e carga juntas). Útil quando o
+    nível absoluto de temperatura muda entre regimes (ex.: B-4064A pós-reparo).
+
+    Ajuste (coefs=None) deve ser feito no TRAIN; em val/test passe os `coefs` retornados para
+    evitar vazamento. Se replace=True, substitui a coluna de temperatura pelo resíduo; senão
+    adiciona uma coluna `{col}__resid`.
+    """
+    df = df.copy()
+    fitted = coefs is not None
+    coefs = dict(coefs) if coefs else {}
+    x = df[load_column].values.astype("float64")
+    for col in temp_columns:
+        if not fitted:
+            mask = (~np.isnan(x)) & (~np.isnan(df[col].values))
+            if mask.sum() >= 2:
+                b, a = np.polyfit(x[mask], df[col].values[mask], 1)  # slope, intercept
+            else:
+                b, a = 0.0, float(np.nanmean(df[col].values))
+            coefs[col] = (float(a), float(b))
+        a, b = coefs[col]
+        resid = df[col].values - (a + b * x)
+        if replace:
+            df[col] = resid
+        else:
+            df[f"{col}__resid"] = resid
+    return df, coefs
+
+
 def run_preprocessing(
     df: pd.DataFrame,
     steps: list[dict],
@@ -287,6 +353,10 @@ def run_preprocessing(
             df, artifacts.knn_imputer = knn_impute(df, imputer=artifacts.knn_imputer, **params)
         elif step == "add_rolling_features":
             df = add_rolling_features(df, **params)
+        elif step == "add_load_residual":
+            df, artifacts.load_residual_coefs = add_load_residual(
+                df, coefs=artifacts.load_residual_coefs, **params
+            )
         else:
             raise ValueError(f"Unknown preprocessing step: '{step}'")
 

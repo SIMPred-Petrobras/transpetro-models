@@ -226,6 +226,8 @@ def cusum_anomaly_score(
     errors: np.ndarray,
     k: float = 0.5,
     h: float = 5.0,
+    mu: float | None = None,
+    sigma: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     CUSUM unilateral (upper) sobre erros de reconstrução para detectar
@@ -235,6 +237,9 @@ def cusum_anomaly_score(
     ----------
     k : folga em unidades de std (tipicamente 0.5 × delta mínimo a detectar)
     h : limiar de decisão em unidades de std
+    mu, sigma : média/desvio de referência. Se None, são estimados sobre `errors`
+        (comportamento original). Para evitar vazamento no grid, passe mu/sigma
+        calibrados nos erros de TREINO.
 
     Retorna
     -------
@@ -245,8 +250,8 @@ def cusum_anomaly_score(
     vários períodos, tornando-o menos suscetível a falsos positivos que o
     threshold por percentil.
     """
-    mu = float(np.mean(errors))
-    sigma = float(np.std(errors))
+    mu = float(np.mean(errors)) if mu is None else float(mu)
+    sigma = float(np.std(errors)) if sigma is None else float(sigma)
     if sigma < 1e-10:
         return np.zeros(len(errors), dtype=np.float32), np.zeros(len(errors), dtype=bool)
 

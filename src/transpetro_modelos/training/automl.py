@@ -9,7 +9,7 @@ Funções genéricas reutilizáveis:
   rank_results()  — ordena resultados por composite_score
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from itertools import product
 from typing import Any
@@ -23,6 +23,8 @@ from transpetro_modelos.data.preprocessing import run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder, VAE
 from transpetro_modelos.training.evaluate import (
+    apply_debounce,
+    cusum_anomaly_score,
     compute_isolation_forest_errors,
     compute_lof_errors,
     compute_ocsvm_errors,
@@ -220,6 +222,9 @@ class TrialConfig:
     lof_n_neighbors: int = 20
     lof_contamination: float = 0.05
     debounce_consecutive: int = 1  # 1 = sem debounce; >1 = N pontos consecutivos necessários
+    alarm_policy: str = "threshold"  # "threshold" (percentil, default) ou "cusum" (deriva sustentada)
+    cusum_k: float = 0.5  # folga do CUSUM em unidades de std (só usado se alarm_policy="cusum")
+    cusum_h: float = 5.0  # limiar de decisão do CUSUM em unidades de std
 
     def label(self) -> str:
         vs = self.val_start.strftime("%Y-%m-%d") if self.val_start else "auto"
@@ -244,6 +249,8 @@ class TrialConfig:
             parts.extend([f"nu{self.ocsvm_nu:g}", f"gamma{self.ocsvm_gamma}"])
         if self.debounce_consecutive > 1:
             parts.append(f"deb{self.debounce_consecutive}")
+        if self.alarm_policy != "threshold":
+            parts.append(f"{self.alarm_policy}-k{self.cusum_k:g}-h{self.cusum_h:g}")
         return "__".join(parts)
 
 
@@ -270,6 +277,7 @@ def build_trials(
     lof_n_neighbors_list: list[int] | None = None,
     lof_contamination_list: list[float] | None = None,
     debounce_consecutives: list[int] | None = None,
+    alarm_policies: list[str] | None = None,
     epochs: int = 100,
     patience: int = 10,
     quick: bool = False,
@@ -418,6 +426,17 @@ def build_trials(
         else:
             raise ValueError(f"Modelo desconhecido: {model}")
 
+    # Política de alarme (opt-in). Default ["threshold"] → nenhuma expansão (idêntico ao original).
+    # "cusum" gera variantes do mesmo trial com alarme por deriva. OBS: como o CUSUM ignora o
+    # threshold_percentile, restrinja --thresholds (ex.: um só) ao rodar cusum para não inflar a grade.
+    _policies = alarm_policies or ["threshold"]
+    if _policies != ["threshold"]:
+        expanded: list[TrialConfig] = []
+        for t in trials:
+            for pol in _policies:
+                expanded.append(t if pol == "threshold" else replace(t, alarm_policy=pol))
+        trials = expanded
+
     return trials
 
 
@@ -488,6 +507,18 @@ def run_trial(
         batch_size=trial.batch_size,
     )
 
+    # Política de alarme CUSUM (opt-in): recalcula is_anomaly por deriva sustentada,
+    # calibrando mu/sigma nos erros de TREINO (sem vazamento). Default "threshold" inalterado.
+    if trial.alarm_policy == "cusum":
+        mu = float(np.mean(train_errors))
+        sigma = float(np.std(train_errors))
+        _, is_alarm = cusum_anomaly_score(
+            scores["reconstruction_error"].values,
+            k=trial.cusum_k, h=trial.cusum_h, mu=mu, sigma=sigma,
+        )
+        scores = scores.copy()
+        scores["is_anomaly"] = is_alarm
+
     metrics = failure_detection_metrics(
         scores,
         config.failure_date,
@@ -510,6 +541,19 @@ def run_trial(
         "pct_anomalies": float(scores["is_anomaly"].mean()),
     })
     row.update(metrics)
+
+    # FP HELD-OUT: taxa de alarme medida na janela de VALIDAÇÃO (fora do treino), número honesto
+    # de falso positivo (o normal_alert_rate padrão cai majoritariamente no train). Aditivo —
+    # não altera o ranking; serve para auditar quão otimista é o FP in-sample.
+    try:
+        sc_db = apply_debounce(scores, consecutive=trial.debounce_consecutive)
+        val_lo, val_hi = splits["val"].index.min(), splits["val"].index.max()
+        vmask = (sc_db.index >= val_lo) & (sc_db.index <= val_hi)
+        row["val_fp_rate_heldout"] = float(sc_db.loc[vmask, "is_anomaly"].mean()) if bool(vmask.any()) else None
+        row["val_scored_samples"] = int(vmask.sum())
+    except Exception:
+        row["val_fp_rate_heldout"] = None
+        row["val_scored_samples"] = 0
 
     return row
 

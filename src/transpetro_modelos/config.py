@@ -18,6 +18,12 @@ class EquipmentConfig:
     local_feather: Optional[str] = None  # override path for local loading (relative to project root)
     dataset_file_stem: Optional[str] = None  # override filename stem when fetching from ClearML (default: equipment_id)
     val_start_date: Optional[datetime] = None  # fixed validation start date (e.g., Jul 1)
+    # Janelas de avaliação (failure_detection_metrics). None = usa o default global do CLI (30 / 60).
+    # Configurar por equipamento quando a série é curta ou o sinal de falha é concentrado:
+    # normal_end_days precisa cair DENTRO dos dados, senão a janela normal fica vazia,
+    # normal_alert_rate=0 e a constraint --max-fp-rate é silenciosamente desativada.
+    prefailure_days: Optional[int] = None
+    normal_end_days: Optional[int] = None
 
 
 _THERMAL_VIB_FEATURES = [
@@ -123,6 +129,62 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         preprocessing_steps=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS["baseline"]),
         preprocess_presets=deepcopy(B4064A_NOVOS_PREPROCESS_PRESETS),
     ),
+    # Config "produção" do B-4064A com os ajustes da análise de regime (docs/analise_b4064a_regime.md):
+    # mascara dropouts de vibração e adiciona o preset load_residual (resíduo Temp~Corrente,
+    # invariante ao regime de carga). Reusa o MESMO dataset do ClearML (B-4064A-novos).
+    "B-4064A-prod": EquipmentConfig(
+        equipment_id="B-4064A-prod",
+        failure_date=datetime(2024, 8, 30, 7, 58),
+        failure_description="Roçamento interno do rotor com a carcaça da bomba",
+        dataset_name="transpetro-b-4064a-novos",
+        dataset_file_stem="B-4064A-novos",  # arquivo dentro do dataset ClearML transpetro-b-4064a-novos
+        datetime_column="Timestamp",
+        exclusion_days_before=10,
+        local_feather="Dados-novos/B-4064A_novos.feather",
+        val_start_date=datetime(2024, 7, 1),
+        # Assinatura da falha de 2024 é nos últimos ~2 dias → janela pré-falha curta (3d casa
+        # com o precursor; 5d diluía); janela normal com buffer (jan-ago/2024 dá normal cheio).
+        prefailure_days=3,
+        normal_end_days=20,
+        pre_split_steps=[
+            {"step": "remove_sensor_errors", "error_values": [-25.0]},
+            {"step": "resample", "freq": "1h"},
+            {"step": "ffill", "limit": 6},
+            {"step": "filter_running", "column": "Corrente", "threshold": 5.0},
+            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 0.0},
+            # Mascara dropouts do sensor de vibração (<=0.2, inclui negativos impossíveis).
+            {"step": "filter_running", "column": "Vibração Bomba LNA", "threshold": 0.2},
+            {"step": "remove_transients", "minutes": 120, "gap_minutes": 90},
+        ],
+        preprocessing_steps=[
+            {"step": "clip"},
+            {"step": "normalize", "method": "robust"},
+        ],
+        preprocess_presets={
+            "baseline": [
+                {"step": "clip"},
+                {"step": "normalize", "method": "robust"},
+            ],
+            # Resíduo de temperatura do mancal condicionado à carga (substitui a temp absoluta):
+            # captura "mais quente do que a carga explica" e é invariante à troca de regime de carga.
+            "load_residual": [
+                {"step": "add_load_residual",
+                 "temp_columns": ["Temperatura Bomba LA", "Temperatura Bomba LNA"],
+                 "load_column": "Corrente", "replace": True},
+                {"step": "clip"},
+                {"step": "normalize", "method": "robust"},
+            ],
+            # Resíduo + média móvel curta (suaviza ruído do resíduo antes do clip/normalize).
+            "load_residual_ma": [
+                {"step": "add_load_residual",
+                 "temp_columns": ["Temperatura Bomba LA", "Temperatura Bomba LNA"],
+                 "load_column": "Corrente", "replace": True},
+                {"step": "moving_average", "window": 3, "min_periods": 1},
+                {"step": "clip"},
+                {"step": "normalize", "method": "robust"},
+            ],
+        },
+    ),
     "B-8802B": EquipmentConfig(
         equipment_id="B-8802B",
         failure_date=datetime(2022, 7, 6, 10, 0),
@@ -130,6 +192,14 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         dataset_name="transpetro-b-8802b",
         datetime_column=None,
         exclusion_days_before=10,
+        # Falha súbita (trinca no acoplamento): o sinal de vibração só emerge na última
+        # semana (precursor VibLNA ~01/jul, rampa sustentada ~04/jul). prefailure_days=30
+        # diluía o alvo com 3 semanas de operação normal. normal_end_days=60 colocava o fim
+        # do período normal em 07/mai — ANTES do início dos dados (15/mai) — deixando a janela
+        # normal vazia e desativando a constraint --max-fp-rate. 7/20 concentra o alvo na
+        # semana de degradação e mede FP sobre ~5.2k amostras normais limpas (gap de 13 dias).
+        prefailure_days=7,
+        normal_end_days=20,
         pre_split_steps=[
             {"step": "remove_sensor_errors", "error_values": [0.0]},
             {"step": "filter_running", "column": "Pressão Descarga", "threshold": 35.0},
@@ -144,14 +214,13 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "clip", "upper_pct": 99.9},
             {"step": "normalize", "method": "robust"},
         ],
-        # Dados em 5 min: windows=[12, 72] = 1 h e 6 h
+        # Dados em 5 min: windows=[12, 72] = 1 h e 6 h.
+        # Preset "rolling" removido: para falha súbita as features std/diff não melhoram a
+        # separabilidade do sinal (que vive no degrau bruto de vibração) e diluem o sinal
+        # multivariado, além de serem as mais propensas a falso positivo no período normal.
+        # rolling_ma (suaviza antes) é preferível se um preset com janelas for desejado.
         preprocess_presets={
             "baseline": [
-                {"step": "clip", "upper_pct": 99.9},
-                {"step": "normalize", "method": "robust"},
-            ],
-            "rolling": [
-                {"step": "add_rolling_features", "windows": [12, 72]},
                 {"step": "clip", "upper_pct": 99.9},
                 {"step": "normalize", "method": "robust"},
             ],
