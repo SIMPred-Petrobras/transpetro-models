@@ -1,5 +1,5 @@
 """
-AutoML para Detecção de Anomalias - VERSÃO CORRIGIDA
+AutoML para Detecção de Anomalias - VERSÃO CORRIGIDA (baseada no seu código)
 ==================================
 Modelos : Dense Autoencoder | LSTM Autoencoder | One-Class SVM | Isolation Forest
 Seleção : Score composto balanceado com penalização de falsos positivos
@@ -39,6 +39,7 @@ from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_pr
 from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
 from transpetro_modelos.training.evaluate import (
+    apply_debounce,
     compute_balanced_score,
     compute_ocsvm_errors,
     compute_reconstruction_errors,
@@ -335,7 +336,7 @@ def build_trials(
     elif mode == "extensive":
         _models = models or ["dense", "lstm", "ocsvm", "iforest"]
         _presets = presets or available_presets
-        _thresholds = thresholds or [95.0, 97.5, 99.0, 99.5]  # Sem 90% (muito FP)
+        _thresholds = thresholds or [95.0, 97.5, 99.0, 99.5]
         _val_starts = val_start_dates or default_val_starts
         
         _layers = dense_layers or [
@@ -358,7 +359,7 @@ def build_trials(
         _iforest_trees = iforest_n_estimators or [100, 200, 300, 500]
         _debounces = debounce_consecutives or [1, 2, 4, 6, 12]
         
-        _epochs, _patience = 150, 25  # Reduzido de 400/50
+        _epochs, _patience = 150, 25
 
     else:  # full
         _models = models or ["dense", "lstm", "ocsvm", "iforest"]
@@ -568,24 +569,13 @@ def run_trial(
 # ════════════════════════════════════════════════════════════════
 
 def rank_results(rows: list[dict[str, Any]], max_fp_rate: float | None = None) -> pd.DataFrame:
-    """
-    Ordena trials com suporte a constraint de FP.
-    
-    Args:
-        rows: Lista de resultados de trials
-        max_fp_rate: Taxa máxima de FP permitida (0-1). Se None, usa composite_score puro.
-    
-    Returns:
-        DataFrame ordenado
-    """
+    """Ordena trials com suporte a constraint de FP."""
     df = pd.DataFrame(rows).reset_index(drop=True)
 
     if max_fp_rate is not None and max_fp_rate > 0:
-        # CONSTRAINT MODE: apenas modelos com FP <= max_fp_rate
         viable = df[df["normal_alert_rate"] <= max_fp_rate]
 
         if len(viable) == 0:
-            # Nenhum satisfaz: retorna ordenado por menor FP
             print(f"\nAVISO: Nenhum modelo atingiu max_fp_rate={max_fp_rate:.2%}")
             print("Retornando ordenado por menor taxa de FP...\n")
             return df.sort_values(
@@ -593,13 +583,11 @@ def rank_results(rows: list[dict[str, Any]], max_fp_rate: float | None = None) -
                 ascending=[True, False],
             ).reset_index(drop=True)
 
-        # Entre viáveis: maximiza pré-falha
         return viable.sort_values(
             ["prefailure_alert_rate", "composite_score", "normal_alert_rate"],
             ascending=[False, False, True],
         ).reset_index(drop=True)
 
-    # SEM CONSTRAINT: ordenação tradicional
     return df.sort_values(
         ["composite_score", "prefailure_alert_rate", "normal_alert_rate"],
         ascending=[False, False, True],
@@ -646,7 +634,7 @@ def main(
     prefailure_days: int = 30,
     normal_end_days: int = 60,
     max_fp_rate: float | None = None,
-    clearml_project=None
+    clearml_project=None,
 ) -> None:
     """Pipeline principal do AutoML."""
     start_time = time.time()
@@ -660,16 +648,21 @@ def main(
     print(f"Max FP Rate: {max_fp_rate:.2%}" if max_fp_rate else "Max FP Rate: ∞ (sem constraint)")
     print("=" * 70 + "\n")
 
+    Task.add_requirements("setuptools>=65.0")  # FIX para OpenSSL 3.0
+    Task.add_requirements("gitpython>=3.1.40")  # FIX para clone
     Task.add_requirements("pyarrow")
     Task.add_requirements("torch", package_version="")
 
     task = Task.init(
-        project_name=clearml_project,
+        project_name=clearml_project or "Transpetro",
         task_name=f"automl_{equipment_id}_{mode}",
         output_uri=True,
     )
 
+    task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
+
     if remote:
+        print(f"Executando remotamente na fila: {queue}")
         task.execute_remotely(queue_name=queue)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -759,6 +752,41 @@ def main(
     print(ranking[[c for c in ["composite_score", "prefailure_alert_rate", "normal_alert_rate", "model"] 
                    if c in ranking.columns]].head(10).to_string())
 
+    if local_artifacts_dir:
+        output_dir = Path(local_artifacts_dir) / f"{equipment_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"\n💾 Salvando artifacts em: {output_dir}")
+        
+        ranking.to_parquet(output_dir / "ranking.parquet")
+        print(f"  ✓ Ranking salvo")
+        
+        if "_model" in best_row and best_row["_model"] is not None:
+            model = best_row["_model"]
+            model_type = best_row["model"]
+            
+            if model_type in ["ocsvm", "iforest"]:
+                model_path = output_dir / f"best_model_{equipment_id}.pkl"
+                with model_path.open("wb") as f:
+                    pickle.dump(model, f)
+            else:
+                model_path = output_dir / f"best_model_{equipment_id}.pt"
+                torch.save(model.state_dict(), model_path)
+            
+            print(f"  ✓ Modelo salvo")
+        
+        if "_scores_df" in best_row and best_row["_scores_df"] is not None:
+            scores_path = output_dir / "best_scores.parquet"
+            best_row["_scores_df"].to_parquet(scores_path)
+            print(f"  ✓ Scores salvos")
+        
+        if upload_to_clearml and task is not None:
+            print(f"\n  📤 Upload ao ClearML...")
+            task.upload_artifact("automl_ranking", artifact_object=ranking)
+            if "_scores_df" in best_row:
+                task.upload_artifact("best_scores", artifact_object=best_row["_scores_df"])
+            print(f"  ✓ Upload completo")
+
     duration = time.time() - start_time
     print(f"\n{'=' * 70}")
     print(f"Duração: {duration / 3600:.1f}h | Trials: {len(rows)}/{len(trials)} | "
@@ -802,5 +830,5 @@ if __name__ == "__main__":
         prefailure_days=args.prefailure_days,
         normal_end_days=args.normal_end_days,
         max_fp_rate=args.max_fp_rate if args.max_fp_rate > 0 else None,
-        clearml_project=args.clearml_project
+        clearml_project=args.clearml_project,
     )
