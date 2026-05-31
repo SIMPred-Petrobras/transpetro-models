@@ -109,8 +109,6 @@ class TrialConfig:
             if self.dense_layers:
                 layers_str = "-".join(str(d) for d in self.dense_layers)
                 parts.append(f"arch_{layers_str}")
-            if self.dropout > 0:
-                parts.append(f"drop{self.dropout:g}")
 
         elif self.model == "lstm":
             parts.extend([
@@ -118,8 +116,6 @@ class TrialConfig:
                 f"hid{self.lstm_hidden_dim}",
                 f"lay{self.lstm_num_layers}",
             ])
-            if self.dropout > 0:
-                parts.append(f"drop{self.dropout:g}")
 
         elif self.model == "iforest":
             parts.extend([
@@ -167,7 +163,6 @@ def train_model(
     patience: int = 10,
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-5,
-    dropout: float = 0.0, 
     logger=None,
     ocsvm_nu: float = 0.05,
     ocsvm_gamma: str | float = "scale",
@@ -195,7 +190,6 @@ def train_model(
             hidden_dim=lstm_hidden_dim,
             num_layers=lstm_num_layers,
             seq_len=seq_len,
-            dropout=dropout, 
         ).to(device)
         train_loader = make_sequence_dataloader(
             train_df, seq_len=seq_len, batch_size=batch_size, shuffle=True, device=device
@@ -207,7 +201,6 @@ def train_model(
         model = DenseAutoencoder(
             input_dim=n_features,
             encoding_layers=list(dense_layers) if dense_layers else None,
-            dropout=dropout, 
         ).to(device)
         train_loader = make_dataloader(
             train_df, batch_size=batch_size, shuffle=True, device=device
@@ -293,7 +286,6 @@ def build_trials(
     dense_lrs: list[float] | None = None,
     batch_sizes: list[int] | None = None,
     weight_decays: list[float] | None = None,
-    dropouts: list[float] | None = None,
     seq_lens: list[int] | None = None,
     lstm_hidden_dims: list[int] | None = None,
     lstm_num_layers: list[int] | None = None,
@@ -325,7 +317,6 @@ def build_trials(
         _lrs = dense_lrs or [1e-3]
         _batches = batch_sizes or [256]
         _weight_decays = weight_decays or [1e-5]
-        _dropouts = dropouts or [0.0]
         _seq_lens = seq_lens or [24]
         _hidden = lstm_hidden_dims or [64]
         _nlayers = lstm_num_layers or [2]
@@ -349,12 +340,10 @@ def build_trials(
         _lrs = dense_lrs or [1e-3, 5e-4, 1e-4, 5e-5]
         _batches = batch_sizes or [128, 256, 512]
         _weight_decays = weight_decays or [0, 1e-5, 1e-4]
-        _dropouts = dropouts or [0.0, 0.1, 0.2]
         
         _seq_lens = seq_lens or [12, 24, 36, 48, 72]
         _hidden = lstm_hidden_dims or [32, 64, 96, 128]
         _nlayers = lstm_num_layers or [1, 2, 3]
-        _lstm_dropouts = [0.0, 0.1, 0.2]
         
         _nus = ocsvm_nus or [0.001, 0.005, 0.01, 0.05, 0.1, 0.15, 0.2]
         _gammas = ocsvm_gammas or ["scale", "auto", "0.001", "0.01", "0.1"]
@@ -377,12 +366,10 @@ def build_trials(
         _lrs = dense_lrs or [1e-3, 5e-4, 1e-4]
         _batches = batch_sizes or [128, 256, 512]
         _weight_decays = weight_decays or [0, 1e-5]
-        _dropouts = dropouts or [0.0, 0.1]
         
         _seq_lens = seq_lens or [12, 24, 48]
         _hidden = lstm_hidden_dims or [32, 64, 128]
         _nlayers = lstm_num_layers or [1, 2, 3]
-        _lstm_dropouts = [0.0, 0.1]
         
         _nus = ocsvm_nus or [0.005, 0.01, 0.05, 0.1]
         _gammas = ocsvm_gammas or ["scale", "auto", 0.01]
@@ -398,23 +385,22 @@ def build_trials(
         _val_starts, _presets, _models, _thresholds, _debounces
     ):
         if model == "dense":
-            for lr, bs, layers, wd, drop in product(_lrs, _batches, _layers, _weight_decays, _dropouts):
+            for lr, bs, layers, wd in product(_lrs, _batches, _layers, _weight_decays):
                 trials.append(TrialConfig(
                     val_start=val_start, preset=preset, model=model,
                     threshold_percentile=threshold, debounce_consecutive=debounce,
                     learning_rate=lr, batch_size=bs, dense_layers=layers,
-                    weight_decay=wd, dropout=drop,
+                    weight_decay=wd,
                     epochs=_epochs, patience=_patience,
                 ))
 
         elif model == "lstm":
-            dropout_list = _lstm_dropouts if mode in ("extensive", "full") else [0.0]
-            for sl, hd, nl, drop in product(_seq_lens, _hidden, _nlayers, dropout_list):
+            for sl, hd, nl in product(_seq_lens, _hidden, _nlayers):
                 trials.append(TrialConfig(
                     val_start=val_start, preset=preset, model=model,
                     threshold_percentile=threshold, debounce_consecutive=debounce,
                     seq_len=sl, lstm_hidden_dim=hd, lstm_num_layers=nl,
-                    dropout=drop, epochs=_epochs, patience=_patience,
+                    epochs=_epochs, patience=_patience,
                 ))
 
         elif model == "ocsvm":
@@ -491,7 +477,6 @@ def run_trial(
         patience=trial.patience,
         learning_rate=trial.learning_rate,
         weight_decay=trial.weight_decay,
-        dropout=trial.dropout,
         ocsvm_nu=trial.ocsvm_nu,
         ocsvm_gamma=trial.ocsvm_gamma,
         iforest_contamination=trial.iforest_contamination,
