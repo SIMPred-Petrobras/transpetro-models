@@ -167,6 +167,7 @@ def train_model(
     patience: int = 10,
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-5,
+    dropout: float = 0.0, 
     logger=None,
     ocsvm_nu: float = 0.05,
     ocsvm_gamma: str | float = "scale",
@@ -194,6 +195,7 @@ def train_model(
             hidden_dim=lstm_hidden_dim,
             num_layers=lstm_num_layers,
             seq_len=seq_len,
+            dropout=dropout, 
         ).to(device)
         train_loader = make_sequence_dataloader(
             train_df, seq_len=seq_len, batch_size=batch_size, shuffle=True, device=device
@@ -205,6 +207,7 @@ def train_model(
         model = DenseAutoencoder(
             input_dim=n_features,
             encoding_layers=list(dense_layers) if dense_layers else None,
+            dropout=dropout, 
         ).to(device)
         train_loader = make_dataloader(
             train_df, batch_size=batch_size, shuffle=True, device=device
