@@ -382,6 +382,64 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "normalize", "method": "standard"},
         ],
     ),
+    # --- Equipamentos FRACOS (triagem det×FP) — configurados para DOCUMENTAR o resultado ruim ---
+    # B-402E: quebra de barra do rotor + colisão estator (falha catastrófica/súbita com TRIP).
+    # Triagem: ~5% @1%FP (assinatura = transiente de partida; sem precursor gradual). Filtro Corrente>200.
+    "B-402E": EquipmentConfig(
+        equipment_id="B-402E",
+        failure_date=datetime(2019, 10, 30, 11, 6),
+        failure_description="Quebra de barra do rotor do motor com colisão no enrolamento estatórico (TRIP)",
+        dataset_name="transpetro-b-402e",
+        datetime_column="Data Hora",
+        exclusion_days_before=10,
+        local_feather="Dados/B-402E.feather",
+        prefailure_days=7,
+        normal_end_days=20,
+        pre_split_steps=[
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+            {"step": "filter_running", "column": "Corrente", "threshold": 200.0},
+            {"step": "remove_transients", "minutes": 30, "gap_minutes": 15},
+            {"step": "select_features", "features": [
+                "Corrente", "Vazão", "Vibração Bomba LA",
+                "Temperatura Estator U", "Temperatura Estator V",
+                "Temperatura Estator Wa", "Temperatura Estator Wb",
+                "Temperatura Mancal LA Motor", "Temperatura Mancal LNA Motor",
+            ]},
+        ],
+        preprocessing_steps=[
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
+        ],
+    ),
+    # B-5401A: motor em curto (1ª falha 2024-08-10). Triagem: ~0% @1%FP (curto súbito sem precursor).
+    # Sensor de vibração MORTO (zeros) e Temp Mancal Motor LA SATURADA(100) — excluídos do select.
+    "B-5401A": EquipmentConfig(
+        equipment_id="B-5401A",
+        failure_date=datetime(2024, 8, 10, 0, 0),
+        failure_description="Motor elétrico em curto (substituído)",
+        dataset_name="transpetro-b-5401a",
+        datetime_column=None,
+        exclusion_days_before=10,
+        local_feather="DadosV2/B-5401A_pivoted.feather",
+        prefailure_days=7,
+        normal_end_days=20,
+        pre_split_steps=[
+            {"step": "filter_running", "column": "Corrente", "threshold": 50.0},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+            {"step": "remove_transients", "minutes": 30, "gap_minutes": 15},
+            {"step": "select_features", "features": [
+                "Corrente", "Indicador de Velocidade", "Pressão de Descarga", "Pressão de Sucção",
+                "Temperatura Mancal Bomba LA", "Temperatura Mancal Bomba LNA",
+                "Temperatura Mancal Motor LNA",
+            ]},
+        ],
+        preprocessing_steps=[
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
+        ],
+    ),
 }
 
 
