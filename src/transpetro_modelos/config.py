@@ -278,6 +278,10 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         dataset_name="transpetro-b-6511502a",
         datetime_column=None,
         exclusion_days_before=10,
+        # Falha súbita (acoplamento): sinal só no último dia; dados acabam ~1,4d antes da falha.
+        # prefailure curto (3d) casa com o sinal; normal_end=20 dá janela normal cheia.
+        prefailure_days=3,
+        normal_end_days=20,
         local_feather="DadosV2/B-6511502A_pivoted.feather",
         pre_split_steps=[
             {"step": "remove_sensor_errors", "error_values": [32767.0]},
