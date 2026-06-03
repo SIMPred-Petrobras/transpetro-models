@@ -198,7 +198,8 @@ def run_grid_search(args: argparse.Namespace):
     best_scores = None
     best_trial = None
     best_row = None
-    best_score = -np.inf
+    # Chave de seleção (prefailure desc, FP asc) — desempate consistente com rank_results.
+    best_key = (-np.inf, -np.inf)
 
     for i, trial in enumerate(trials, 1):
         print(f"[{i:03d}/{len(trials):03d}] {trial.label()} ... ", end="", flush=True)
@@ -229,11 +230,22 @@ def run_grid_search(args: argparse.Namespace):
                 logger.report_scalar("automl", "prefailure_alert_rate", float(row["prefailure_alert_rate"]), iteration=i)
                 logger.report_scalar("automl", "normal_alert_rate", fp, iteration=i)
 
-            # Critério de seleção do melhor: FP dentro da constraint E maior detecção pré-falha
-            fp_ok = (max_fp_rate <= 0) or (fp <= max_fp_rate)
+            # Critério de seleção do melhor: FP dentro da constraint E maior detecção pré-falha.
+            # --select-by heldout usa o FP medido na VALIDAÇÃO (val_fp_rate_heldout) — número
+            # honesto (o normal_alert_rate é majoritariamente in-sample; auditoria A1). Fallback
+            # para o in-sample quando o held-out não está disponível no trial.
+            fp_heldout = row.get("val_fp_rate_heldout")
+            if args.select_by == "heldout" and fp_heldout is not None:
+                fp_sel = float(fp_heldout)
+            else:
+                fp_sel = fp
+            fp_ok = (max_fp_rate <= 0) or (fp_sel <= max_fp_rate)
             candidate_score = float(row["prefailure_alert_rate"]) if (max_fp_rate > 0) else cs
-            if fp_ok and candidate_score > best_score:
-                best_score = candidate_score
+            # Desempate: prefailure desc, depois MENOR FP (antes, o primeiro a empatar vencia —
+            # ex.: LSTM salvo como "best" no B-6511502A com o VAE acima dele no ranking).
+            candidate_key = (candidate_score, -fp_sel)
+            if fp_ok and candidate_key > best_key:
+                best_key = candidate_key
                 best_trial = trial
                 best_row = row
                 # Re-treina para guardar o modelo (run_trial não retorna o modelo)
@@ -245,7 +257,11 @@ def run_grid_search(args: argparse.Namespace):
     if not rows:
         raise RuntimeError("Nenhum trial válido foi executado.")
 
-    results = rank_results(rows, max_fp_rate=max_fp_rate if max_fp_rate > 0 else None)
+    results = rank_results(
+        rows,
+        max_fp_rate=max_fp_rate if max_fp_rate > 0 else None,
+        fp_column="val_fp_rate_heldout" if args.select_by == "heldout" else "normal_alert_rate",
+    )
 
     print("\n" + "=" * 100)
     print("TOP 10 configurações:")
@@ -402,6 +418,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clearml-project", default="Transpetro")
     parser.add_argument("--clearml-task-name", default=None,
                         help="Nome da task ClearML (default: automl-anomaly-<equipment>)")
+    parser.add_argument("--select-by", choices=["insample", "heldout"], default="insample",
+                        help="FP usado na seleção/ranking do melhor trial: insample (default, "
+                             "normal_alert_rate) ou heldout (val_fp_rate_heldout — FP honesto na "
+                             "validação; recomendado). Fallback p/ insample se held-out indisponível.")
     parser.add_argument("--alarm-policies", nargs="+", choices=["threshold", "cusum"], default=None,
                         help="Política(s) de alarme: threshold (percentil, default) e/ou cusum (deriva "
                              "sustentada). Ao usar cusum, restrinja --thresholds (o CUSUM ignora o percentil).")

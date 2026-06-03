@@ -563,35 +563,48 @@ def run_trial(
 def rank_results(
     rows: list[dict[str, Any]],
     max_fp_rate: float | None = None,
+    fp_column: str = "normal_alert_rate",
 ) -> pd.DataFrame:
     """
     Ordena trials priorizando baixos falsos positivos.
 
     Se max_fp_rate for fornecido, aplica uma constraint hard:
-      - Apenas trials com normal_alert_rate <= max_fp_rate são considerados viáveis.
+      - Apenas trials com FP <= max_fp_rate são considerados viáveis.
       - Dentro dos viáveis, ordena por prefailure_alert_rate (maximiza detecção).
       - Se nenhum trial satisfaz a constraint, retorna todos ordenados por
-        normal_alert_rate crescente (o menos pior em FP primeiro).
+        FP crescente (o menos pior em FP primeiro).
+
+    fp_column: coluna de FP usada na constraint/ordenação. Default "normal_alert_rate"
+    (in-sample, comportamento original). Use "val_fp_rate_heldout" para o FP honesto
+    medido na validação (auditoria A1); valores ausentes caem para o normal_alert_rate.
 
     Se max_fp_rate=None, usa o critério original: composite_score descendente.
     """
     df = pd.DataFrame(rows)
 
+    if fp_column != "normal_alert_rate" and fp_column in df.columns:
+        fp_sel = df[fp_column].fillna(df["normal_alert_rate"])
+    else:
+        fp_sel = df["normal_alert_rate"]
+
     if max_fp_rate is not None:
-        viable = df[df["normal_alert_rate"] <= max_fp_rate]
+        df = df.assign(_fp_sel=fp_sel)
+        viable = df[df["_fp_sel"] <= max_fp_rate]
         if len(viable) == 0:
             return (
                 df.sort_values(
-                    ["normal_alert_rate", "prefailure_alert_rate"],
+                    ["_fp_sel", "prefailure_alert_rate"],
                     ascending=[True, False],
                 )
+                .drop(columns=["_fp_sel"])
                 .reset_index(drop=True)
             )
         return (
             viable.sort_values(
-                ["prefailure_alert_rate", "normal_alert_rate"],
+                ["prefailure_alert_rate", "_fp_sel"],
                 ascending=[False, True],
             )
+            .drop(columns=["_fp_sel"])
             .reset_index(drop=True)
         )
 

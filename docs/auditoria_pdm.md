@@ -74,6 +74,19 @@ OBS: o CUSUM ignora o `threshold_percentile` → restrinja `--thresholds` (ex.: 
 a grade. `cusum_h` precisa ser TUNADO por equipamento (h alto = menos sensível). Hoje o default h=5
 dispara muito em série curta. **Reverter:** não passar `--alarm-policies` (ou passar só `threshold`).
 
+### (D) Seleção por FP held-out (`--select-by heldout`) + desempate consistente
+Motivado por caso REAL: no B-6511502A, o AutoML salvou o LSTM como "best" (100% @ 0,87% in-sample),
+mas out-of-sample o LSTM tem um cluster de FP (06/mai) inseparável da falha — o DENSE generaliza
+melhor (69% @ 0,06%, 0 FP pré-07). E no B-4064A o trial escolhido VIOLAVA a constraint honesta
+(held-out 1,51% > 1%). Dois bugs corrigidos:
+1. `--select-by heldout` (scripts/automl.py + rank_results(fp_column)): constraint e ordenação usam
+   `val_fp_rate_heldout` (FP na validação) em vez do in-sample; fallback p/ in-sample se ausente.
+   Default `insample` = comportamento anterior. **Reverter:** não passar o flag.
+2. Desempate do "best" no loop agora = mesmo critério do ranking (prefailure desc → FP asc); antes
+   o PRIMEIRO a empatar vencia (por isso o LSTM foi salvo com o VAE acima dele no ranking).
+**Ressalva:** com 1 falha por equipamento, nenhuma métrica substitui a validação out-of-sample no
+notebook (re-threshold + comparação top-N) — o flag reduz o risco, não o elimina.
+
 ---
 
 ## Parte 3 — Propositadamente NÃO implementado (para próxima rodada, por segurança/escopo)
