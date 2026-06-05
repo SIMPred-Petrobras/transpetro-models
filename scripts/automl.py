@@ -632,7 +632,7 @@ def main(
     print(f"{'AUTOML - DETECÇÃO DE ANOMALIAS (OTIMIZADO)':^70}")
     print("=" * 70)
     print(f"Equipamento: {equipment_id}")
-    print(f"Modo       : {mode}")
+    print(f"Modo: {mode}")
     print(f"Max FP Rate: {max_fp_rate:.2%}" if max_fp_rate else "Max FP Rate: ∞ (sem constraint)")
     print("=" * 70 + "\n")
 
@@ -744,10 +744,15 @@ def main(
         output_dir = Path(local_artifacts_dir) / f"{equipment_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        print(f"\n💾 Salvando artifacts em: {output_dir}")
+        print(f"\nSalvando artifacts em: {output_dir}")
         
         ranking.to_parquet(output_dir / "ranking.parquet")
-        print(f"  ✓ Ranking salvo")
+        print(f"✓ Ranking salvo")
+
+        best_trial_dict = {k: v for k, v in best_row.items() if not k.startswith("_")}
+        with open(output_dir / "best_trial.json", "w") as f:
+            json.dump(best_trial_dict, f, indent=2, default=str)
+        print(f"✓ Best trial salvo")
         
         if "_model" in best_row and best_row["_model"] is not None:
             model = best_row["_model"]
@@ -761,19 +766,21 @@ def main(
                 model_path = output_dir / f"best_model_{equipment_id}.pt"
                 torch.save(model.state_dict(), model_path)
             
-            print(f"  ✓ Modelo salvo")
+            print(f"✓ Modelo salvo")
         
         if "_scores_df" in best_row and best_row["_scores_df"] is not None:
             scores_path = output_dir / "best_scores.parquet"
             best_row["_scores_df"].to_parquet(scores_path)
-            print(f"  ✓ Scores salvos")
+            print(f"✓ Scores salvos")
         
         if upload_to_clearml and task is not None:
-            print(f"\n  📤 Upload ao ClearML...")
+            print(f"\n Upload ao ClearML...")
             task.upload_artifact("automl_ranking", artifact_object=ranking)
             if "_scores_df" in best_row:
                 task.upload_artifact("best_scores", artifact_object=best_row["_scores_df"])
-            print(f"  ✓ Upload completo")
+
+            task.upload_artifact("best_trial", artifact_object=best_trial_dict)
+            print(f"✓ Upload completo")
 
     duration = time.time() - start_time
     print(f"\n{'=' * 70}")
