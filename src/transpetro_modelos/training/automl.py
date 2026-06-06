@@ -462,6 +462,7 @@ def run_trial(
         failure_date=config.failure_date,
         exclusion_days=config.exclusion_days_before,
         val_start_date=trial.val_start,
+        val_end_date=config.val_end_date,
     )
     if len(splits["train"]) < min_rows or len(splits["val"]) < min_rows:
         return None

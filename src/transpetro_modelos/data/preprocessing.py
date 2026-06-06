@@ -32,6 +32,15 @@ def remove_negatives(df: pd.DataFrame, column: str) -> pd.DataFrame:
     df.loc[df[column] < 1, column] = np.nan
     return df
 
+def filter_threshold(df: pd.DataFrame, columns: list[str], threshold: float) -> pd.DataFrame:
+    """Keep rows where ALL given columns exceed threshold (branch Lara).
+    Missing columns are ignored; if none exist, returns df unchanged."""
+    existing = [c for c in columns if c in df.columns]
+    if not existing:
+        return df
+    mask = df[existing].gt(threshold).all(axis=1)
+    return df[mask].copy()
+
 def remove_transients(df: pd.DataFrame, minutes: int = 10, gap_minutes: int = 5) -> pd.DataFrame:
     """
     Remove the first N minutes after each pump restart.
@@ -331,6 +340,8 @@ def run_preprocessing(
             df = filter_running(df, **params)
         elif step == "remove_negatives":
             df = remove_negatives(df, **params)
+        elif step == "filter_threshold":
+            df = filter_threshold(df, **params)
         elif step == "remove_transients":
             df = remove_transients(df, **params)
         elif step == "normalize":

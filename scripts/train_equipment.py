@@ -185,6 +185,7 @@ def main(
         failure_date=config.failure_date,
         exclusion_days=hparams["exclusion_days"],
         val_start_date=val_start,
+        val_end_date=config.val_end_date,
     )
 
     logger = task.get_logger()

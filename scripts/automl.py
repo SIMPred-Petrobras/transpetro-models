@@ -320,6 +320,7 @@ def _retrain_best(trial: TrialConfig, equipment_id: str, df_pre, device: str):
         failure_date=config.failure_date,
         exclusion_days=config.exclusion_days_before,
         val_start_date=trial.val_start,
+        val_end_date=config.val_end_date,
     )
     steps = get_preprocessing_steps(equipment_id, preset=trial.preset)
     train_df, artifacts, _ = run_preprocessing(splits["train"], steps, return_artifacts=True, return_report=True)

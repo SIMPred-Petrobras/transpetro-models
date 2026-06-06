@@ -18,6 +18,7 @@ class EquipmentConfig:
     local_feather: Optional[str] = None  # override path for local loading (relative to project root)
     dataset_file_stem: Optional[str] = None  # override filename stem when fetching from ClearML (default: equipment_id)
     val_start_date: Optional[datetime] = None  # fixed validation start date (e.g., Jul 1)
+    val_end_date: Optional[datetime] = None  # fixed validation end (branch Lara); rows between it and the cutoff are excluded
     # Janelas de avaliação (failure_detection_metrics). None = usa o default global do CLI (30 / 60).
     # Configurar por equipamento quando a série é curta ou o sinal de falha é concentrado:
     # normal_end_days precisa cair DENTRO dos dados, senão a janela normal fica vazia,
@@ -85,6 +86,25 @@ B4064A_NOVOS_PREPROCESS_PRESETS: dict[str, list[dict]] = {
         {"step": "add_rolling_features", "windows": [6, 24]},
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
+    ],
+}
+
+
+# Presets para bases interpoladas (branch Lara): normalização standard, variantes knn/MA.
+_INTERPOLATED_PRESETS_LARA: dict[str, list[dict]] = {
+    "baseline_interpolated": [
+        {"step": "clip"},
+        {"step": "normalize", "method": "standard"},
+    ],
+    "knn_interpolated": [
+        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
+        {"step": "clip"},
+        {"step": "normalize", "method": "standard"},
+    ],
+    "moving_average_interpolated": [
+        {"step": "moving_average", "window": 3, "min_periods": 1},
+        {"step": "clip"},
+        {"step": "normalize", "method": "standard"},
     ],
 }
 
@@ -439,6 +459,45 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "clip", "upper_pct": 99.9},
             {"step": "normalize", "method": "robust"},
         ],
+    ),
+    # --- Equipamentos da branch Lara (bases interpoladas; usam val_end_date) ---
+    "B-3403C_interpolated": EquipmentConfig(
+        equipment_id="B-3403C_interpolated",
+        failure_date=datetime(2023, 9, 12),
+        failure_description="Quebra da ponta do eixo LNA da bomba",
+        dataset_name="transpetro-b-3403c_interpolated",
+        datetime_column="Timestamp",
+        exclusion_days_before=10,
+        local_feather="Dados/B-3403C_interpolated.csv",
+        val_start_date=datetime(2023, 8, 24),
+        val_end_date=datetime(2023, 9, 2),
+        pre_split_steps=[
+            {"step": "filter_running", "column": "Corrente", "threshold": 1},
+            {"step": "remove_transients", "minutes": 10},
+        ],
+        preprocessing_steps=deepcopy(_INTERPOLATED_PRESETS_LARA["baseline_interpolated"]),
+        preprocess_presets=deepcopy(_INTERPOLATED_PRESETS_LARA),
+    ),
+    "B-90001A_interpolated": EquipmentConfig(
+        equipment_id="B-90001A_interpolated",
+        failure_date=datetime(2021, 8, 28),
+        failure_description="Afrouxamento no aperto dos parafusos do mancal do lado acoplado da bomba",
+        dataset_name="transpetro-b-90001a_interpolated",
+        datetime_column="Timestamp",
+        exclusion_days_before=10,
+        local_feather="Dados/B-90001A_interpolated.csv",
+        val_start_date=datetime(2021, 8, 9),
+        val_end_date=datetime(2021, 8, 18),
+        pre_split_steps=[
+            {"step": "filter_threshold", "columns": [
+                "Vibração Motor LNA Y", "Vibração Motor LA X", "Vibração Motor LA Y",
+                "Vibração Bomba LA X", "Vibração Bomba LA Y",
+                "Vibração Bomba LNA X", "Vibração Bomba LNA Y",
+            ], "threshold": 10},
+            {"step": "remove_transients", "minutes": 10},
+        ],
+        preprocessing_steps=deepcopy(_INTERPOLATED_PRESETS_LARA["baseline_interpolated"]),
+        preprocess_presets=deepcopy(_INTERPOLATED_PRESETS_LARA),
     ),
 }
 
