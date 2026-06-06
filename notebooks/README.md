@@ -33,6 +33,11 @@
   B-8802B (gradual 3-7d → 100%, lead até ~6d), B-6511502A (nível real gradual → 80%),
   B-4064A (+20°C/7d → 80%, ~70h).
 
+## B-4703.24001B — desgaste mancal LNA motor (01/out/2022) [FRACO — documentado]
+- `b4703_24001b/automl_b4703_doc.ipynb` — full c/ `--select-by heldout` (task `d7375726`):
+  melhor = VAE **0,8% @ ~1% FP held-out** (re-threshold: 2,3% @ 0,16%) — nível de ruído, confirma
+  a triagem. Desgaste de rolamento exige espectro/envelope (BPFO/BPFI/BSF); RMS 1min não enxerga.
+
 ## Descartados pela triagem (sem notebook de resultado; treinar só p/ documentar)
-- B-4703.24001B, B-402E, B-5401A — instrumentação insuficiente p/ o modo de falha
+- B-402E, B-5401A — instrumentação insuficiente p/ o modo de falha
   (~0-5% @1%FP na triagem; ver `docs/auditoria_pdm.md` e memória do projeto).
