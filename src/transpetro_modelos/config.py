@@ -110,22 +110,23 @@ _INTERPOLATED_PRESETS_LARA: dict[str, list[dict]] = {
 
 
 EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
+    # Base interpolada do B-4064A (versão branch Lara: Timestamp, val_end_date e presets interpolados)
     "B-4064A_interpolated": EquipmentConfig(
-        equipment_id="B-4064A",
+        equipment_id="B-4064A_interpolated",
         failure_date=datetime(2024, 8, 30, 7, 58),
         failure_description="Roçamento interno do rotor com a carcaça da bomba",
         dataset_name="transpetro-b-4064a_interpolated",
-        datetime_column=None,
+        datetime_column="Timestamp",
         exclusion_days_before=10,
+        local_feather="Dados/B-4064A_interpolated.csv",
         val_start_date=datetime(2024, 8, 11),
+        val_end_date=datetime(2024, 8, 20),
         pre_split_steps=[
             {"step": "filter_running", "column": "Corrente", "threshold": 30},
             {"step": "remove_transients", "minutes": 10},
         ],
-        preprocessing_steps=[
-            {"step": "clip"},
-            {"step": "normalize", "method": "standard"},
-        ],
+        preprocessing_steps=deepcopy(_INTERPOLATED_PRESETS_LARA["baseline_interpolated"]),
+        preprocess_presets=deepcopy(_INTERPOLATED_PRESETS_LARA),
     ),
     "B-4064A-novos": EquipmentConfig(
         equipment_id="B-4064A-novos",
