@@ -2,6 +2,10 @@
 
 Detecção de anomalias em bombas da Transpetro usando autoencoders densos (PyTorch). O modelo aprende o padrão de operação normal e sinaliza anomalias quando o erro de reconstrução supera um threshold.
 
+> 📄 **Visão geral do projeto + roteiro de deploy:** [`docs/OVERVIEW.md`](docs/OVERVIEW.md)
+> (organização, fluxo de ponta a ponta, status da frota e passo a passo para produção).
+> O runner atual é o `scripts/automl.py` (AutoML) — a seção abaixo descreve o fluxo simples original.
+
 **Equipamentos cobertos:**
 
 | Equipamento | Falha | Data |

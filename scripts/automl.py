@@ -81,6 +81,7 @@ def _save_best_artifacts(
     best_scores,
     best_trial: TrialConfig,
     best_row: dict[str, Any],
+    best_artifacts: Any = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     best_scores.to_parquet(output_dir / "best_full_scores.parquet")
@@ -91,6 +92,12 @@ def _save_best_artifacts(
             pickle.dump(best_model, f)
     else:
         torch.save(best_model.state_dict(), output_dir / "best_model.pt")
+    # PreprocessingArtifacts (scaler/clip_bounds/load_residual_coefs) ajustados no treino.
+    # Sem este arquivo não é possível pontuar dados novos no deploy (a normalização seria
+    # reajustada na janela nova → escala errada → threshold inválido).
+    if best_artifacts is not None:
+        with (output_dir / "preprocessing.pkl").open("wb") as f:
+            pickle.dump(best_artifacts, f)
 
 
 def _init_clearml(args: argparse.Namespace, n_trials: int):
@@ -196,6 +203,7 @@ def run_grid_search(args: argparse.Namespace):
     rows = []
     best_model = None
     best_scores = None
+    best_artifacts = None
     best_trial = None
     best_row = None
     # Chave de seleção (prefailure desc, FP asc) — desempate consistente com rank_results.
@@ -249,7 +257,7 @@ def run_grid_search(args: argparse.Namespace):
                 best_trial = trial
                 best_row = row
                 # Re-treina para guardar o modelo (run_trial não retorna o modelo)
-                best_model, best_scores = _retrain_best(trial, args.equipment, df_pre, device)
+                best_model, best_scores, best_artifacts = _retrain_best(trial, args.equipment, df_pre, device)
 
         except Exception as exc:
             print(f"ERRO: {exc}")
@@ -287,7 +295,7 @@ def run_grid_search(args: argparse.Namespace):
         and best_row is not None
     ):
         artifacts_dir = Path(args.artifacts_dir)
-        _save_best_artifacts(artifacts_dir, best_model, best_scores, best_trial, best_row)
+        _save_best_artifacts(artifacts_dir, best_model, best_scores, best_trial, best_row, best_artifacts)
         print(f"Artefatos do melhor trial salvos em: {artifacts_dir}")
 
         if task is not None:
@@ -296,6 +304,9 @@ def run_grid_search(args: argparse.Namespace):
             trial_dict = asdict(best_trial)
             trial_dict["val_start"] = best_trial.val_start.isoformat() if best_trial.val_start else None
             task.upload_artifact("best_trial", artifact_object={"trial": trial_dict, "results": best_row})
+            if best_artifacts is not None:
+                # Preprocessing ajustado no treino — necessário para inferência no deploy.
+                task.upload_artifact("preprocessing", artifact_object=best_artifacts)
 
     if task is not None and best_row is not None:
         logger = task.get_logger()
@@ -358,7 +369,9 @@ def _retrain_best(trial: TrialConfig, equipment_id: str, df_pre, device: str):
         seq_len=trial.seq_len,
         batch_size=trial.batch_size,
     )
-    return model, scores
+    # artifacts = scaler/clip_bounds/coefs ajustados no TREINO; precisam ser persistidos
+    # para reaplicar o MESMO preprocessing em dados novos no deploy (inferência sem vazamento).
+    return model, scores, artifacts
 
 
 def build_parser() -> argparse.ArgumentParser:
