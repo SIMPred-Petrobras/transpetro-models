@@ -48,19 +48,18 @@ def upload_metadata() -> None:
     print(f"Uploading metadata (falhas.xlsx)...")
 
     ds = Dataset.create(
-        dataset_name="transpetro-metadata",
+        dataset_name="transpetro-metadata_interpolated",
         dataset_project="Transpetro",
     )
     ds.add_files(str(file_path))
     ds.upload()
     ds.finalize()
-    print(f"  Done: transpetro-metadata (ID: {ds.id})")
+    print(f"  Done: {ds.dataset_name} (ID: {ds.id})")
 
 
 def main() -> None:
     for equipment_id in EQUIPMENT_CONFIGS:
         upload_equipment_dataset(equipment_id)
-    upload_metadata()
     print("\nAll datasets uploaded successfully.")
 
 

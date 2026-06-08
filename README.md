@@ -56,6 +56,15 @@ uv run python scripts/train_equipment.py --equipment B-402E --remote
 
 Com `--remote`, o script registra a task, envia para a fila `default` do ClearML e **para a execução local**. O worker `cica:gpu0` executa tudo no servidor. Você pode fechar o terminal.
 
+Para o `B-4064A-novos`, o treino multivariado agora aceita presets de preprocessamento:
+
+```bash
+uv run python scripts/train_equipment.py --equipment B-4064A-novos --remote --queue default --preprocess-preset baseline
+uv run python scripts/train_equipment.py --equipment B-4064A-novos --remote --queue default --preprocess-preset moving_average
+uv run python scripts/train_equipment.py --equipment B-4064A-novos --remote --queue default --preprocess-preset knn
+uv run python scripts/train_equipment.py --equipment B-4064A-novos --remote --queue default --preprocess-preset moving_average_knn
+```
+
 Equipamentos disponíveis: `B-402E`, `B-4064A`, `B-8802B`, `B-90001A`
 
 ---
@@ -111,9 +120,36 @@ preprocessing_steps = [
 ]
 ```
 
-Steps disponíveis: `filter_running`, `remove_transients`, `normalize` (`standard`/`minmax`/`robust`), `select_features`, `resample`.
+Steps disponíveis: `filter_running`, `remove_transients`, `remove_sensor_errors`, `resample`, `ffill`, `moving_average`, `knn_impute`, `clip`, `normalize` (`standard`/`minmax`/`robust`), `select_features`.
+
+### Detalhe do `ffill` (`forward fill`)
+
+O step `ffill` usa `pandas.DataFrame.ffill(limit=N).dropna()`:
+
+- `limit=N` significa: preencher no máximo `N` períodos consecutivos sem leitura com o último valor válido.
+- Gaps maiores que `N` ficam parcialmente sem preenchimento.
+- Em seguida, `dropna()` remove linhas ainda incompletas.
+
+Exemplo do projeto (`B-4064A-novos`):
+
+```python
+{"step": "resample", "freq": "1h"},
+{"step": "ffill", "limit": 6},
+```
+
+Com `freq="1h"`, `limit=6` equivale a preencher até **6 horas consecutivas** de gap.  
+Se o gap tiver 8 horas, as primeiras 6 podem ser preenchidas e o restante permanece `NaN` (sendo removido no `dropna()`).
 
 Para experimentar com diferentes configurações, basta clonar a task no dashboard ClearML, alterar os hyperparâmetros e enfileirar novamente.
+
+### Presets do `B-4064A-novos`
+
+Etapas aplicadas antes do split (em todos os presets): `remove_sensor_errors -> resample -> ffill -> filter_running`.
+
+- `baseline`: `clip -> normalize`
+- `moving_average`: `moving_average -> clip -> normalize`
+- `knn`: `knn_impute -> clip -> normalize`
+- `moving_average_knn`: `knn_impute -> moving_average -> clip -> normalize`
 
 ---
 

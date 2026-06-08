@@ -7,6 +7,12 @@ LOCAL_DATA_DIR = Path(__file__).parent.parent.parent.parent / "Dados"
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
 
+def _read_file(file_path: Path) -> pd.DataFrame:
+    if file_path.suffix == ".feather":
+        return pd.read_feather(file_path)
+    return pd.read_csv(file_path)
+
+
 def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.DataFrame:
     """
     Carrega dados de um equipamento com DatetimeIndex.
@@ -14,25 +20,32 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
     """
     config = EQUIPMENT_CONFIGS[equipment_id]
 
+    stem = config.dataset_file_stem or equipment_id
+
     if from_clearml:
         from clearml import Dataset
         ds = Dataset.get(
             dataset_name=config.dataset_name,
             dataset_project="Transpetro",
         )
-        local_path = ds.get_local_copy()
-        file_path = Path(local_path) / f"{equipment_id}.feather"
+        local_path = Path(ds.get_local_copy())
+        feather_path = local_path / f"{stem}.feather"
+        file_path = feather_path if feather_path.exists() else local_path / f"{stem}.csv"
     elif config.local_feather is not None:
         file_path = PROJECT_ROOT / config.local_feather
     else:
-        file_path = LOCAL_DATA_DIR / f"{equipment_id}.feather"
+        feather_path = LOCAL_DATA_DIR / f"{stem}.feather"
+        file_path = feather_path if feather_path.exists() else LOCAL_DATA_DIR / f"{stem}.csv"
 
-    df = pd.read_feather(file_path)
+    df = _read_file(file_path)
 
-    if config.datetime_column is not None:
+    if isinstance(df.index, pd.DatetimeIndex):
+        pass
+    elif config.datetime_column is not None:
         df = df.set_index(config.datetime_column)
         df.index = pd.to_datetime(df.index)
     else:
+        df = df.set_index("datetime")
         df.index = pd.to_datetime(df.index)
 
     df = df.sort_index()
