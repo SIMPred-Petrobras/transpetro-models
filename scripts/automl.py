@@ -351,7 +351,7 @@ def build_trials(
         _iforest_trees = iforest_n_estimators or [100, 200, 300, 500]
         _debounces = debounce_consecutives or [1, 2, 4, 6, 12]
         
-        _epochs, _patience = 150, 25
+        _epochs, _patience = epochs * 2, patience * 2
 
     else:  # full
         _models = models or ["dense", "lstm", "ocsvm", "iforest"]
