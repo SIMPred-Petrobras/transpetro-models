@@ -38,13 +38,28 @@ ou na task do ClearML. Para baixar os artefatos de uma task remota concluída, u
 
 ## Passo 2 — Empacotar para o Drive
 
-Com os artefatos em mãos (ex.: `results/automl_B-8802B`):
+### Opção A (recomendada) — direto da task do ClearML
+
+Um comando baixa os artefatos da task concluída e empacota:
+
+```bash
+uv run python scripts/fetch_and_package.py --equipment B-8802B --task-id <ID_DA_TASK>
+# ou pelo nome:
+uv run python scripts/fetch_and_package.py --equipment B-8802B --task-name automl-b8802b-deploy
+```
+
+> Requer que a task tenha sido treinada com o `automl.py` atual, que sobe os artifacts
+> `best_model`, `preprocessing` e `best_trial`.
+
+### Opção B — a partir de artefatos locais
+
+Se você tem a pasta de artefatos local (ex.: de um run local com `--artifacts-dir`):
 
 ```bash
 uv run python scripts/package_for_drive.py --equipment B-8802B --artifacts-dir results/automl_B-8802B
 ```
 
-Isso gera `deploy/Transpetro/B-8802B/` com:
+Qualquer uma das opções gera `deploy/Transpetro/B-8802B/` com:
 - `metadata.csv` (sensores) — **confira o `equipment_type`** (hoje preenchido como "Bomba").
 - `dados/<periodo>/data_<inicio>_<fim>_raw.csv`
 - `documentos/` (overview + análises do equipamento)

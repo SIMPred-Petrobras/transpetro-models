@@ -260,19 +260,17 @@ if __name__ == "__main__":
     (scripts_dir / f"{slug}-exemplo.py").write_text(script)
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Empacota um equipamento no padrão SIMPred (Drive).")
-    ap.add_argument("--equipment", required=True, choices=list(REGISTRY.keys()))
-    ap.add_argument("--artifacts-dir", default=None,
-                    help="Pasta com os artefatos do treino (best_model/preprocessing/best_trial). "
-                         "Se omitido, gera tudo menos o bundle do modelo.")
-    ap.add_argument("--out", default=None, help="Raiz de saída (default: deploy/Transpetro)")
-    args = ap.parse_args()
+def package(equipment: str, artifacts_dir: str | Path | None = None,
+            out_root: str | Path | None = None) -> Path:
+    """Monta a árvore SIMPred de um equipamento. Retorna o diretório do equipamento.
 
-    equipment = args.equipment
+    Se `artifacts_dir` for dado (pasta com best_model/preprocessing/best_trial), monta
+    também a pasta `modelos/`; senão, gera tudo menos o bundle do modelo."""
+    if equipment not in REGISTRY:
+        raise ValueError(f"Equipamento {equipment!r} não está no REGISTRY: {list(REGISTRY)}")
     reg = REGISTRY[equipment]
     config_key = reg["config"]
-    out_root = Path(args.out) if args.out else PROJECT_ROOT / "deploy" / "Transpetro"
+    out_root = Path(out_root) if out_root else PROJECT_ROOT / "deploy" / "Transpetro"
     eq_dir = out_root / equipment
     eq_dir.mkdir(parents=True, exist_ok=True)
 
@@ -300,11 +298,11 @@ def main():
             shutil.copy(src, docs_dir / doc)
     print(f"  docs    : documentos/  ({len(list(docs_dir.iterdir()))} arquivos)")
 
-    # ── modelos/ (opcional, requer --artifacts-dir) ──
+    # ── modelos/ (opcional, requer artifacts_dir) ──
     bundle_name = f"model_{lo}_{hi}_{reg['arch']}"
-    if args.artifacts_dir:
+    if artifacts_dir:
         info = assemble_model_bundle(
-            eq_dir / "modelos" / bundle_name, equipment, config_key, Path(args.artifacts_dir)
+            eq_dir / "modelos" / bundle_name, equipment, config_key, Path(artifacts_dir)
         )
         print(f"  modelos : modelos/{bundle_name}/  ({info['model_type']}, thr={info['threshold']:.5g})")
     else:
@@ -315,6 +313,18 @@ def main():
     print(f"  scripts : scripts/{equipment.lower().replace('.', '').replace('-', '')}-exemplo.py")
 
     print(f"\n✓ {equipment} empacotado em: {eq_dir}")
+    return eq_dir
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Empacota um equipamento no padrão SIMPred (Drive).")
+    ap.add_argument("--equipment", required=True, choices=list(REGISTRY.keys()))
+    ap.add_argument("--artifacts-dir", default=None,
+                    help="Pasta com os artefatos do treino (best_model/preprocessing/best_trial). "
+                         "Se omitido, gera tudo menos o bundle do modelo.")
+    ap.add_argument("--out", default=None, help="Raiz de saída (default: deploy/Transpetro)")
+    args = ap.parse_args()
+    package(args.equipment, artifacts_dir=args.artifacts_dir, out_root=args.out)
 
 
 if __name__ == "__main__":

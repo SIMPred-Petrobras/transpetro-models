@@ -307,6 +307,14 @@ def run_grid_search(args: argparse.Namespace):
             if best_artifacts is not None:
                 # Preprocessing ajustado no treino — necessário para inferência no deploy.
                 task.upload_artifact("preprocessing", artifact_object=best_artifacts)
+            # Arquivo do modelo — sem isto um run remoto não deixa o modelo recuperável
+            # (best_model.pt fica só no disco do worker). Necessário para fetch_and_package.
+            model_file = artifacts_dir / (
+                "best_model.pkl" if best_trial.model in ("ocsvm", "isolation_forest", "lof")
+                else "best_model.pt"
+            )
+            if model_file.exists():
+                task.upload_artifact("best_model", artifact_object=model_file)
 
     if task is not None and best_row is not None:
         logger = task.get_logger()
