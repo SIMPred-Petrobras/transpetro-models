@@ -38,20 +38,6 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
         {"step": "normalize", "method": "robust"},
     ],
 
-    "knn_raw": [
-        {"step": "interpolate", "method": "time", "limit": 4},
-        *COMMUM_PREPROCESSING_STEPS,
-        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
-        {"step": "clip"},
-        {"step": "normalize", "method": "robust"},
-    ],
-
-    "knn_interpolated": [
-        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
-        {"step": "clip"},
-        {"step": "normalize", "method": "robust"},
-    ],
-
     "moving_average_raw": [
         {"step": "interpolate", "method": "time", "limit": 4},
         *COMMUM_PREPROCESSING_STEPS,
@@ -62,6 +48,20 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
 
     "moving_average_interpolated": [
         {"step": "moving_average", "window": 3, "min_periods": 1},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+
+    "knn_raw": [
+        {"step": "interpolate", "method": "time", "limit": 4},
+        *COMMUM_PREPROCESSING_STEPS,
+        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+
+    "knn_interpolated": [
+        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
     ],

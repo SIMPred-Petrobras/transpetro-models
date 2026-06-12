@@ -327,6 +327,55 @@ def build_trials(
         _debounces = debounce_consecutives or [1]
         _epochs, _patience = 20, 5
 
+        '''    else:  # full
+        _models = models or ["dense", "lstm", "ocsvm", "iforest"]
+        _presets = presets or available_presets
+        _thresholds = thresholds or [90.0, 95.0, 97.5, 99.0]
+        _val_starts = val_start_dates or default_val_starts
+        
+        _layers = dense_layers or [
+            None, (64, 32, 16), (128, 64, 32),
+            (256, 128, 64), (128, 64, 32, 16),
+        ]
+        _lrs = dense_lrs or [1e-3, 5e-4, 1e-4]
+        _batches = batch_sizes or [128, 256, 512]
+        _weight_decays = weight_decays or [0, 1e-5]
+        
+        _seq_lens = seq_lens or [12, 24, 48]
+        _hidden = lstm_hidden_dims or [32, 64, 128]
+        _nlayers = lstm_num_layers or [1, 2, 3]
+        
+        _nus = ocsvm_nus or [0.005, 0.01, 0.05, 0.1]
+        _gammas = ocsvm_gammas or ["scale", "auto", 0.01]
+        _iforest_conts = iforest_contaminations or [0.005, 0.01, 0.05]
+        _iforest_trees = iforest_n_estimators or [100, 200, 500]
+        _debounces = debounce_consecutives or [1, 4, 6]'''
+
+    elif mode == "balanced":
+        _models = models or ["dense", "lstm", "ocsvm", "iforest"]
+        _presets = presets or available_presets[:2]
+        _thresholds = thresholds or [95.0, 97.5, 99.0]
+        _val_starts = val_start_dates or default_val_starts
+        
+        _layers = dense_layers or [
+            None, (64, 32), (128, 64), (256, 128)
+        ]
+        _lrs = dense_lrs or [1e-3, 1e-4]  
+        _batches = batch_sizes or [256] 
+        _weight_decays = weight_decays or [0,1e-5] 
+        
+        _seq_lens = seq_lens or [24, 48] 
+        _hidden = lstm_hidden_dims or [64, 128]  
+        _nlayers = lstm_num_layers or [1, 2]  
+        
+        _nus = ocsvm_nus or [0.01, 0.05, 0.1] 
+        _gammas = ocsvm_gammas or ["scale", "auto"]  
+        _iforest_conts = iforest_contaminations or [0.01, 0.05] 
+        _iforest_trees = iforest_n_estimators or [100, 300] 
+        _debounces = debounce_consecutives or [1, 4, 6] 
+        
+        _epochs, _patience = epochs, patience
+
     elif mode == "extensive":
         _models = models or ["dense", "lstm", "ocsvm", "iforest"]
         _presets = presets or available_presets
@@ -792,7 +841,7 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AutoML para detecção de anomalias (OTIMIZADO)")
     parser.add_argument("--equipment", required=True, choices=list(EQUIPMENT_CONFIGS.keys()))
-    parser.add_argument("--mode", choices=["quick", "full", "extensive"], default="full")
+    parser.add_argument("--mode", choices=["quick", "full", "balanced", "extensive"], default="full")
     parser.add_argument("--remote", action="store_true")
     parser.add_argument("--queue", default="default")
     parser.add_argument("--local-data", action="store_true")
