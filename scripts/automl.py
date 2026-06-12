@@ -709,6 +709,7 @@ def main(
     # LOAD DATA
     print("Carregando dados...")
     df_raw = load_equipment_data(equipment_id, from_clearml=not local_data)
+    print(f"  Shape (RAW):        {df_raw.shape}")
     df_pre, _, _ = run_preprocessing(df_raw, config.pre_split_steps)
     print(f"  Shape: {df_pre.shape}\n")
 
