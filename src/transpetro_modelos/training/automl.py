@@ -53,6 +53,40 @@ from transpetro_modelos.training.train import (
 
 # ── Generic helpers ────────────────────────────────────────────────────────────
 
+
+def build_model(
+    model_type: str,
+    n_features: int,
+    *,
+    dense_layers: list[int] | None = None,
+    seq_len: int = 24,
+    lstm_hidden_dim: int = 64,
+    lstm_num_layers: int = 2,
+    latent_dim: int = 8,
+):
+    """Instancia a arquitetura (PyTorch) SEM treinar — usada para recarregar pesos
+    salvos (state_dict) no deploy. Só faz sentido para modelos PyTorch (dense/lstm/vae);
+    modelos sklearn (ocsvm/iforest/lof) são serializados inteiros via pickle."""
+    if model_type == "vae":
+        return VAE(
+            input_dim=n_features,
+            encoding_layers=list(dense_layers) if dense_layers else None,
+            latent_dim=latent_dim,
+        )
+    if model_type == "lstm":
+        return LSTMAutoencoder(
+            input_dim=n_features,
+            hidden_dim=lstm_hidden_dim,
+            num_layers=lstm_num_layers,
+            seq_len=seq_len,
+        )
+    if model_type == "dense":
+        return DenseAutoencoder(
+            input_dim=n_features,
+            encoding_layers=list(dense_layers) if dense_layers else None,
+        )
+    raise ValueError(f"build_model não suporta model_type={model_type!r} (use pickle p/ sklearn)")
+
 def train_model(
     model_type: str,
     train_df: pd.DataFrame,

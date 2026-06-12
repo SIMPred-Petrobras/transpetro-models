@@ -15,3 +15,5 @@ Dados-novos/
 DadosV2
 results/
 reports/
+# Saída do empacotamento para o Drive (material do Drive, não do repo)
+deploy/Transpetro/
