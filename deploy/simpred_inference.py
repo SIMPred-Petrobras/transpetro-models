@@ -59,10 +59,11 @@ class Bundle:
     preprocessing: Any                 # PreprocessingArtifacts (scaler/clip/coefs do treino)
     pipeline_steps: list[dict]         # passos de preprocessing congelados
     model_type: str                    # dense | lstm | vae | ocsvm | isolation_forest | lof
-    threshold: float
+    threshold: float                   # nível de ALARME (erro acima dispara alarme)
     debounce_consecutive: int
     seq_len: int
     features: list[str]
+    threshold_attention: float | None = None  # nível de ATENÇÃO (< alarme); None desativa
 
 
 def load_bundle(bundle_dir: str | Path, device: str = "cpu") -> Bundle:
@@ -92,6 +93,9 @@ def load_bundle(bundle_dir: str | Path, device: str = "cpu") -> Bundle:
         debounce_consecutive=int(alarm.get("debounce_consecutive", 1)),
         seq_len=int(alarm.get("seq_len", 24)),
         features=list(alarm.get("features", [])),
+        threshold_attention=(
+            float(alarm["threshold_attention"]) if alarm.get("threshold_attention") is not None else None
+        ),
     )
 
 
@@ -140,9 +144,34 @@ def _reconstruction_errors(bundle: Bundle, df_proc: pd.DataFrame, device: str) -
         )
         return seq[["reconstruction_error"]]
 
-    # dense / vae: erro ponto-a-ponto
+    if mt == "vae":
+        # VAE: forward retorna (recon, mu, logvar); erro usa a média do latente.
+        from transpetro_modelos.training.evaluate import compute_vae_errors
+        errors = compute_vae_errors(bundle.model, df_proc, device=device)
+        return pd.DataFrame({"reconstruction_error": errors}, index=df_proc.index)
+
+    # dense: erro ponto-a-ponto (forward retorna (recon, latent))
     errors = compute_reconstruction_errors(bundle.model, df_proc, device=device)
     return pd.DataFrame({"reconstruction_error": errors}, index=df_proc.index)
+
+
+def reconstruction_errors(
+    bundle: Bundle,
+    data: str | Path | pd.DataFrame,
+    device: str = "cpu",
+    datetime_column: str | None = None,
+) -> pd.DataFrame:
+    """Partes 1→4 sem alarme: carrega, processa e devolve só o erro de reconstrução.
+
+    Útil para calibrar thresholds sobre uma janela normal e para análise/plot.
+    Retorna DataFrame [reconstruction_error] indexado por timestamp.
+    """
+    if isinstance(data, (str, Path)):
+        df_raw = _load_data(data, datetime_column)
+    else:
+        df_raw = data.copy()
+    df_proc = preprocess(bundle, df_raw)
+    return _reconstruction_errors(bundle, df_proc, device)
 
 
 def predict(
@@ -154,23 +183,24 @@ def predict(
     """Pipeline completo de inferência (partes 1→4).
 
     `data` pode ser um caminho (.csv/.feather) ou um DataFrame já carregado.
-    Retorna DataFrame [reconstruction_error, is_anomaly] indexado por timestamp,
-    com a flag `is_anomaly` já filtrada por debounce (k-de-n consecutivos).
+    Retorna DataFrame [reconstruction_error, severity, is_anomaly] indexado por
+    timestamp. `is_anomaly` é o nível de ALARME já filtrado por debounce; `severity`
+    é "normal" | "atencao" | "alarme" (o nível de atenção só aparece se o bundle
+    tiver `threshold_attention`).
     """
-    # Parte 1 — Carregamento dos dados
-    if isinstance(data, (str, Path)):
-        df_raw = _load_data(data, datetime_column)
-    else:
-        df_raw = data.copy()
+    scores = reconstruction_errors(bundle, data, device, datetime_column)
 
-    # Parte 3 — Transformações e processamento
-    df_proc = preprocess(bundle, df_raw)
-
-    # Parte 4 — Inferência do modelo
-    scores = _reconstruction_errors(bundle, df_proc, device)
-    scores["is_anomaly"] = scores["reconstruction_error"] > bundle.threshold
+    # Parte 4 — classificação por nível
+    err = scores["reconstruction_error"]
+    scores["is_anomaly"] = err > bundle.threshold
     if bundle.debounce_consecutive > 1:
         scores = apply_debounce(scores, consecutive=bundle.debounce_consecutive)
+
+    severity = pd.Series("normal", index=scores.index, dtype=object)
+    if bundle.threshold_attention is not None:
+        severity[err > bundle.threshold_attention] = "atencao"
+    severity[scores["is_anomaly"]] = "alarme"
+    scores["severity"] = severity
     return scores
 
 

@@ -68,6 +68,26 @@ Qualquer uma das opções gera `deploy/Transpetro/B-8802B/` com:
 
 Sem `--artifacts-dir`, gera tudo menos a pasta `modelos/` (útil para adiantar estrutura/dados).
 
+## Passo 2.5 — Recalibrar os thresholds pela meta de FP (recomendado)
+
+O threshold salvo no treino pode estar calibrado numa janela normal pequena/in-sample,
+gerando FP alto em produção. Recalibre pela **meta de falso positivo** sobre a janela normal
+real, gerando dois níveis (atenção/alarme):
+
+```bash
+uv run python scripts/recalibrate_threshold.py --equipment B-8802B \
+    --normal-end 2022-06-30 --fp-alarm 0.01 --fp-attention 0.05 --failure-date 2022-07-06
+```
+
+- `--normal-end`: fim da janela normal (deixe margem antes da falha p/ não contar a rampa).
+- `--fp-alarm` / `--fp-attention`: metas de FP (decisão de negócio). O threshold é o quantil
+  correspondente — **nunca escolha o número na mão**.
+- Grava `threshold`, `threshold_attention` e o bloco `threshold_calibration` no `alarm.json`.
+
+> ⚠️ **Ordem importa:** rode a recalibração **depois** do empacotamento. Reempacotar
+> (`fetch_and_package`/`package_for_drive`) reescreve o `alarm.json` e desfaz a recalibração —
+> nesse caso, rode o `recalibrate_threshold.py` de novo.
+
 ## Passo 3 — Validar a inferência localmente
 
 ```bash

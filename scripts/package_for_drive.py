@@ -64,6 +64,25 @@ REGISTRY = {
 }
 
 
+# model_type (interno) -> sigla da arquitetura usada no nome da pasta do bundle.
+_ARCH_LABEL = {
+    "dense": "DENSE", "lstm": "LSTM", "vae": "VAE",
+    "ocsvm": "OCSVM", "isolation_forest": "IFOREST", "lof": "LOF",
+}
+
+
+def _arch_from_artifacts(artifacts_dir: Path | None, default: str) -> str:
+    """Lê o model_type real do best_trial.pkl p/ rotular a pasta; cai no default se ausente."""
+    if not artifacts_dir:
+        return default
+    trial_path = Path(artifacts_dir) / "best_trial.pkl"
+    if not trial_path.exists():
+        return default
+    with trial_path.open("rb") as f:
+        best = pickle.load(f)
+    return _ARCH_LABEL.get(best["trial"].model, default)
+
+
 def slugify(name: str) -> str:
     """'Pressão Sucção' -> 'pressao_succao' (tag no padrão metadata.csv)."""
     nfkd = unicodedata.normalize("NFKD", name)
@@ -299,7 +318,9 @@ def package(equipment: str, artifacts_dir: str | Path | None = None,
     print(f"  docs    : documentos/  ({len(list(docs_dir.iterdir()))} arquivos)")
 
     # ── modelos/ (opcional, requer artifacts_dir) ──
-    bundle_name = f"model_{lo}_{hi}_{reg['arch']}"
+    # a sigla da arquitetura vem do modelo realmente treinado (não do palpite do REGISTRY).
+    arch = _arch_from_artifacts(Path(artifacts_dir) if artifacts_dir else None, reg["arch"])
+    bundle_name = f"model_{lo}_{hi}_{arch}"
     if artifacts_dir:
         info = assemble_model_bundle(
             eq_dir / "modelos" / bundle_name, equipment, config_key, Path(artifacts_dir)
