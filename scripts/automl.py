@@ -16,6 +16,7 @@ Uso:
 
 import argparse
 import pickle
+import signal
 import sys
 import warnings
 from dataclasses import asdict
@@ -31,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from transpetro_modelos.config import EQUIPMENT_CONFIGS
 from transpetro_modelos.data.loading import load_equipment_data
 from transpetro_modelos.data.preprocessing import run_preprocessing
+from transpetro_modelos.training import checkpoint as ckpt
 from transpetro_modelos.training.automl import TrialConfig, build_trials, rank_results, run_trial, score_full, train_model
 
 try:
@@ -98,6 +100,30 @@ def _save_best_artifacts(
     if best_artifacts is not None:
         with (output_dir / "preprocessing.pkl").open("wb") as f:
             pickle.dump(best_artifacts, f)
+
+
+def _select_best_row(rows: list[dict], max_fp_rate: float, select_by: str) -> dict | None:
+    """Seleciona o melhor row a partir da lista completa (mesma regra usada antes inline):
+    FP dentro da constraint E maior detecção pré-falha; desempate por MENOR FP."""
+    import numpy as np
+
+    best_key = (-np.inf, -np.inf)
+    best = None
+    for row in rows:
+        fp = float(row["normal_alert_rate"])
+        fp_heldout = row.get("val_fp_rate_heldout")
+        if select_by == "heldout" and fp_heldout is not None:
+            fp_sel = float(fp_heldout)
+        else:
+            fp_sel = fp
+        fp_ok = (max_fp_rate <= 0) or (fp_sel <= max_fp_rate)
+        cs = float(row["composite_score"])
+        candidate_score = float(row["prefailure_alert_rate"]) if (max_fp_rate > 0) else cs
+        candidate_key = (candidate_score, -fp_sel)
+        if fp_ok and candidate_key > best_key:
+            best_key = candidate_key
+            best = row
+    return best
 
 
 def _init_clearml(args: argparse.Namespace, n_trials: int):
@@ -200,16 +226,53 @@ def run_grid_search(args: argparse.Namespace):
     # Valor 0 desativa a constraint (usa composite_score puro como antes).
     max_fp_rate: float = args.max_fp_rate
 
-    rows = []
-    best_model = None
-    best_scores = None
-    best_artifacts = None
-    best_trial = None
-    best_row = None
-    # Chave de seleção (prefailure desc, FP asc) — desempate consistente com rank_results.
-    best_key = (-np.inf, -np.inf)
+    # ── checkpoint/resume: semeia rows/attempted a partir do progresso salvo ──
+    ckpt_path = Path(args.artifacts_dir) / "progress_checkpoint.pkl" if args.artifacts_dir else None
+    rows: list[dict] = []
+    attempted: set[str] = set()
+    if args.resume:
+        payload = ckpt.load_local(ckpt_path) if ckpt_path else None
+        origem = "disco local" if payload else ""
+        if payload is None and task is not None:
+            payload, origem = ckpt.fetch_resume_payload(task, args.resume_from_task)
+        if payload:
+            rows = list(payload.get("rows", []))
+            attempted = set(payload.get("attempted", []))
+            print(f"  [RESUME] {len(rows)} trials concluídos, {len(attempted)} tentados "
+                  f"(origem: {origem}). Pulando os já feitos.")
+
+    sig_to_trial = {ckpt.trial_signature(t): t for t in trials}
+
+    def _save_checkpoint():
+        payload = ckpt.make_payload(rows, attempted)
+        if ckpt_path:
+            ckpt.save_local(payload, ckpt_path)
+        if task is not None:
+            try:
+                ckpt.upload_to_task(task, payload)
+            except Exception as exc:  # nunca derruba o treino por causa do checkpoint
+                print(f"  [checkpoint] falha ao subir no ClearML: {exc}")
+
+    # Flush em SIGTERM/SIGINT (botão de abort do ClearML manda SIGTERM antes do kill).
+    _flushing = {"done": False}
+
+    def _on_signal(signum, _frame):
+        if not _flushing["done"]:
+            _flushing["done"] = True
+            print(f"\n  [signal {signum}] salvando checkpoint antes de sair...")
+            _save_checkpoint()
+        raise SystemExit(128 + signum)
+
+    try:
+        signal.signal(signal.SIGTERM, _on_signal)
+        signal.signal(signal.SIGINT, _on_signal)
+    except ValueError:
+        pass  # fora da main thread: sem handler, mas o checkpoint periódico segue ativo
 
     for i, trial in enumerate(trials, 1):
+        sig = ckpt.trial_signature(trial)
+        if sig in attempted:
+            continue  # já feito num run anterior
         print(f"[{i:03d}/{len(trials):03d}] {trial.label()} ... ", end="", flush=True)
         try:
             row = run_trial(
@@ -217,53 +280,51 @@ def run_grid_search(args: argparse.Namespace):
                 prefailure_days=args.prefailure_days,
                 normal_end_days=args.normal_end_days,
             )
+            attempted.add(sig)  # marca como tentado (pulados/erros não voltam a rodar)
             if row is None:
                 print("SKIP (dados insuficientes)")
-                continue
-
-            rows.append(row)
-            cs = float(row["composite_score"])
-            ratio = float(row["discrimination_ratio"])
-            fp = float(row["normal_alert_rate"])
-            print(
-                f"composite={cs:.4f}  ratio={ratio:.2f}"
-                f"  (pre={float(row['prefailure_alert_rate']):.2%}"
-                f" / normal={fp:.2%})"
-            )
-
-            if task is not None:
-                logger = task.get_logger()
-                logger.report_scalar("automl", "composite_score", cs, iteration=i)
-                logger.report_scalar("automl", "discrimination_ratio", ratio, iteration=i)
-                logger.report_scalar("automl", "prefailure_alert_rate", float(row["prefailure_alert_rate"]), iteration=i)
-                logger.report_scalar("automl", "normal_alert_rate", fp, iteration=i)
-
-            # Critério de seleção do melhor: FP dentro da constraint E maior detecção pré-falha.
-            # --select-by heldout usa o FP medido na VALIDAÇÃO (val_fp_rate_heldout) — número
-            # honesto (o normal_alert_rate é majoritariamente in-sample; auditoria A1). Fallback
-            # para o in-sample quando o held-out não está disponível no trial.
-            fp_heldout = row.get("val_fp_rate_heldout")
-            if args.select_by == "heldout" and fp_heldout is not None:
-                fp_sel = float(fp_heldout)
             else:
-                fp_sel = fp
-            fp_ok = (max_fp_rate <= 0) or (fp_sel <= max_fp_rate)
-            candidate_score = float(row["prefailure_alert_rate"]) if (max_fp_rate > 0) else cs
-            # Desempate: prefailure desc, depois MENOR FP (antes, o primeiro a empatar vencia —
-            # ex.: LSTM salvo como "best" no B-6511502A com o VAE acima dele no ranking).
-            candidate_key = (candidate_score, -fp_sel)
-            if fp_ok and candidate_key > best_key:
-                best_key = candidate_key
-                best_trial = trial
-                best_row = row
-                # Re-treina para guardar o modelo (run_trial não retorna o modelo)
-                best_model, best_scores, best_artifacts = _retrain_best(trial, args.equipment, df_pre, device)
-
+                row["_sig"] = sig
+                rows.append(row)
+                cs = float(row["composite_score"])
+                ratio = float(row["discrimination_ratio"])
+                fp = float(row["normal_alert_rate"])
+                print(
+                    f"composite={cs:.4f}  ratio={ratio:.2f}"
+                    f"  (pre={float(row['prefailure_alert_rate']):.2%}"
+                    f" / normal={fp:.2%})"
+                )
+                if task is not None:
+                    logger = task.get_logger()
+                    logger.report_scalar("automl", "composite_score", cs, iteration=i)
+                    logger.report_scalar("automl", "discrimination_ratio", ratio, iteration=i)
+                    logger.report_scalar("automl", "prefailure_alert_rate", float(row["prefailure_alert_rate"]), iteration=i)
+                    logger.report_scalar("automl", "normal_alert_rate", fp, iteration=i)
         except Exception as exc:
+            attempted.add(sig)  # erro não-transitório não deve reprocessar indefinidamente
             print(f"ERRO: {exc}")
+
+        if i % args.checkpoint_every == 0:
+            _save_checkpoint()
+
+    _save_checkpoint()  # flush final do progresso
 
     if not rows:
         raise RuntimeError("Nenhum trial válido foi executado.")
+
+    # ── seleção do melhor a partir de TODOS os rows + um único retreino ──
+    # (antes o melhor era re-treinado a cada melhora; agora retreina só o vencedor)
+    best_model = best_scores = best_artifacts = best_trial = None
+    best_row = _select_best_row(rows, max_fp_rate, args.select_by)
+    if best_row is not None:
+        best_trial = sig_to_trial.get(best_row.get("_sig"))
+        if best_trial is None:  # rows de um grid antigo cujos args mudaram
+            print("  [AVISO] trial vencedor não está no grid atual (args mudaram?); "
+                  "não dá para retreinar/salvar o modelo.")
+        else:
+            best_model, best_scores, best_artifacts = _retrain_best(
+                best_trial, args.equipment, df_pre, device
+            )
 
     results = rank_results(
         rows,
@@ -450,6 +511,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-fp-rate", type=float, default=0.01,
                         help="Constraint máxima de falso positivo no período normal (default: 0.01 = 1%%). "
                              "Use 0 para desabilitar e usar composite_score puro.")
+    parser.add_argument("--checkpoint-every", type=int, default=50,
+                        help="Salva o progresso (trials já feitos) a cada N trials (default: 50). "
+                             "Permite retomar uma task que caiu sem recomeçar do zero.")
+    parser.add_argument("--resume", dest="resume", action="store_true", default=True,
+                        help="Retoma de um checkpoint anterior se existir (default: ligado).")
+    parser.add_argument("--no-resume", dest="resume", action="store_false",
+                        help="Ignora qualquer checkpoint e roda o grid do zero.")
+    parser.add_argument("--resume-from-task", default=None,
+                        help="ID de uma task ClearML específica de onde retomar o checkpoint "
+                             "(override; por padrão usa o nome estável da task).")
     return parser
 
 
