@@ -453,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Diretório para artefatos do melhor trial (default: results/automl_<equipment>/)")
     parser.add_argument("--local-data", action="store_true",
                         help="Carrega dados locais em vez do ClearML Dataset")
-    parser.add_argument("--mode", choices=["quick", "full", "extensive"], default="full",
+    parser.add_argument("--mode", choices=["quick", "full", "extensive", "balanced"], default="full",
                         help="Modo: quick (5-30 min), full (1 dia), extensive (2 dias) — default: full")
     parser.add_argument("--quick", action="store_true",
                         help="Atalho para --mode quick")

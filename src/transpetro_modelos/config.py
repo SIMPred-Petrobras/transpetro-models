@@ -96,16 +96,18 @@ _INTERPOLATED_PRESETS_LARA: dict[str, list[dict]] = {
         {"step": "clip"},
         {"step": "normalize", "method": "standard"},
     ],
-    "knn_interpolated": [
-        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
-        {"step": "clip"},
-        {"step": "normalize", "method": "standard"},
-    ],
+    
     "moving_average_interpolated": [
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
         {"step": "normalize", "method": "standard"},
     ],
+
+    "knn_interpolated": [
+        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
+        {"step": "clip"},
+        {"step": "normalize", "method": "standard"},
+    ]
 }
 
 

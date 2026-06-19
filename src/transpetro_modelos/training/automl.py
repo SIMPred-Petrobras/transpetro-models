@@ -380,6 +380,27 @@ def build_trials(
         _debounces     = debounce_consecutives or [1, 2, 4, 6, 12]
         _epochs, _patience = epochs * 2, patience * 2
 
+    if mode == "balanced":
+        _presets       = presets       or available_presets[:2]
+        _models        = models        or ["dense", "lstm", "ocsvm", "vae", "isolation_forest", "lof"]
+        _thresholds    = thresholds    or [95.0, 97.5, 99.0]
+        _val_starts    = val_start_dates or default_val_starts
+        _dense_layers  = dense_layers  or [None, (64, 32, 16), (128, 64, 32), (256, 128, 64)]
+        _dense_lrs     = dense_lrs     or [1e-3, 1e-4]
+        _batch_sizes   = batch_sizes   or [128, 256]
+        _seq_lens      = seq_lens      or [24, 48]
+        _lstm_hidden_dims = lstm_hidden_dims or [64, 128]
+        _lstm_layers   = lstm_layers   or [1, 2]
+        _ocsvm_nus     = ocsvm_nus     or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _ocsvm_gammas  = ocsvm_gammas  or ["scale", "auto", "0.001", "0.01", "0.1"]
+        _latent_dims   = latent_dims   or [8, 16, 32]
+        _if_n_estimators   = if_n_estimators_list   or [100, 200, 300]
+        _if_contaminations = if_contamination_list  or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _lof_n_neighbors   = lof_n_neighbors_list   or [10, 20, 50]
+        _lof_contaminations = lof_contamination_list or [0.001, 0.005, 0.01, 0.05, 0.1]
+        _debounces     = debounce_consecutives or [1, 4, 6]
+        _epochs, _patience = epochs, patience
+
     else:  # full (default, ~1 dia)
         _presets       = presets       or available_presets
         _models        = models        or ["dense", "lstm", "ocsvm", "vae", "isolation_forest", "lof"]
