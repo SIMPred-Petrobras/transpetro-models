@@ -164,7 +164,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         val_start_date=datetime(2024, 11, 27),
         val_end_date=datetime(2024, 12, 27),
         pre_split_steps=[
-            {"step": "filter_threshold", "columns": ['VIBRAÇÃO DO MANCAL BOMBA LNA ', 'VIBRAÇÃO DO MANCAL MOTOR LA (003)', 'VIBRAÇÃO DO MANCAL MOTOR LA (004)', 'VIBRAÇÃO DO MANCAL MOTOR LNA (005)', 'VIBRAÇÃO DO MANCAL MOTOR LNA (006)'], "threshold": 5, "mode": "all"},
+            {"step": "filter_threshold", "columns": ['VIBRAÇÃO DO MANCAL BOMBA LA', 'VIBRAÇÃO DO MANCAL BOMBA LNA ', 'VIBRAÇÃO DO MANCAL MOTOR LA (003)', 'VIBRAÇÃO DO MANCAL MOTOR LA (004)', 'VIBRAÇÃO DO MANCAL MOTOR LNA (005)', 'VIBRAÇÃO DO MANCAL MOTOR LNA (006)'], "threshold": "otsu", "mode": "all"},
             {"step": "remove_transients", "minutes": 10},
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),

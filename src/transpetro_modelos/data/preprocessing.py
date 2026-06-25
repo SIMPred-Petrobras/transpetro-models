@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+from skimage.filters import threshold_otsu
 
 
 @dataclass
@@ -27,18 +28,72 @@ def filter_running(df: pd.DataFrame, column: str, threshold: float) -> pd.DataFr
         return df
     return df[df[column] > threshold].copy()
 
-def filter_threshold(df: pd.DataFrame, columns: list[str], threshold: float, mode: str = "all") -> pd.DataFrame:
+from skimage.filters import threshold_otsu
+import pandas as pd
+
+def filter_threshold(
+    df: pd.DataFrame,
+    columns: list[str],
+    threshold,
+    mode: str = "all"
+) -> pd.DataFrame:
+
     existing = [c for c in columns if c in df.columns]
 
     if not existing:
         return df
 
-    if mode == "any":
-        mask = df[existing].gt(threshold).any(axis=1)
-    elif mode == "all":
-        mask = df[existing].gt(threshold).all(axis=1)
+    # -------------------------
+    # CASO 1: threshold fixo (float)
+    # -------------------------
+    if isinstance(threshold, (int, float)):
+        if mode == "any":
+            mask = df[existing].gt(threshold).any(axis=1)
+        elif mode == "all":
+            mask = df[existing].gt(threshold).all(axis=1)
+        else:
+            raise ValueError("mode must be 'any' or 'all'")
+
+    # -------------------------
+    # CASO 2: threshold por coluna (dict)
+    # -------------------------
+    elif isinstance(threshold, dict):
+        flags = pd.DataFrame({
+            col: df[col] > threshold[col]
+            for col in existing
+            if col in threshold
+        })
+
+        if mode == "any":
+            mask = flags.any(axis=1)
+        elif mode == "all":
+            mask = flags.all(axis=1)
+        else:
+            raise ValueError("mode must be 'any' or 'all'")
+
+    # -------------------------
+    # CASO 3: OTSU automático
+    # -------------------------
+    elif threshold == "otsu":
+        th_dict = {
+            col: threshold_otsu(df[col].dropna().to_numpy())
+            for col in existing
+        }
+
+        flags = pd.DataFrame({
+            col: df[col] > th_dict[col]
+            for col in existing
+        })
+
+        if mode == "any":
+            mask = flags.any(axis=1)
+        elif mode == "all":
+            mask = flags.all(axis=1)
+        else:
+            raise ValueError("mode must be 'any' or 'all'")
+
     else:
-        raise ValueError("mode must be 'any' or 'all'")
+        raise ValueError("threshold must be float, dict or 'otsu'")
 
     return df[mask].copy()
 
