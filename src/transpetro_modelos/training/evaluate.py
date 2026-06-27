@@ -338,6 +338,56 @@ def failure_detection_metrics(
     }
 
 
+def failure_detection_metrics_multi(
+    scores: pd.DataFrame,
+    failure_dates: list,
+    prefailure_days: int = 14,
+    normal_end_days: int = 60,
+    consecutive: int = 1,
+) -> dict[str, float | int]:
+    """
+    Agrega métricas de detecção sobre múltiplos incidentes.
+
+    normal_period: antes de (min(failure_dates) - normal_end_days).
+    prefailure_alert_rate: média das taxas individuais por incidente (evita double-count
+    quando janelas se sobrepõem entre incidentes próximos).
+    """
+    if consecutive > 1:
+        scores = apply_debounce(scores, consecutive=consecutive)
+
+    _EPS = 1e-9
+    first_failure = min(pd.Timestamp(d) for d in failure_dates)
+    normal_end = first_failure - pd.Timedelta(days=normal_end_days)
+    normal_flags = scores.loc[scores.index < normal_end, "is_anomaly"]
+    normal_rate = float(normal_flags.mean()) if len(normal_flags) > 0 else 0.0
+
+    per_incident = []
+    for fd in failure_dates:
+        ts = pd.Timestamp(fd)
+        start = ts - pd.Timedelta(days=prefailure_days)
+        flags = scores.loc[(scores.index >= start) & (scores.index < ts), "is_anomaly"]
+        rate = float(flags.mean()) if len(flags) > 0 else 0.0
+        per_incident.append({
+            "prefailure_alert_rate": rate,
+            "n_prefailure_alerts": int(flags.sum()),
+            "n_prefailure_samples": len(flags),
+        })
+
+    prefailure_rate = float(np.mean([r["prefailure_alert_rate"] for r in per_incident]))
+
+    return {
+        "composite_score": prefailure_rate * (1.0 - normal_rate),
+        "discrimination_ratio": prefailure_rate / (normal_rate + _EPS),
+        "prefailure_alert_rate": prefailure_rate,
+        "normal_alert_rate": normal_rate,
+        "n_prefailure_alerts": sum(r["n_prefailure_alerts"] for r in per_incident),
+        "n_normal_alerts": int(normal_flags.sum()),
+        "n_prefailure_samples": sum(r["n_prefailure_samples"] for r in per_incident),
+        "n_normal_samples": len(normal_flags),
+        "n_incidents": len(failure_dates),
+    }
+
+
 def score_test_set(
     model: torch.nn.Module,
     test_df: pd.DataFrame,

@@ -33,6 +33,7 @@ from transpetro_modelos.training.evaluate import (
     compute_vae_errors,
     determine_threshold,
     failure_detection_metrics,
+    failure_detection_metrics_multi,
     fit_isolation_forest,
     fit_lof,
     fit_ocsvm,
@@ -457,9 +458,14 @@ def run_trial(
     config = EQUIPMENT_CONFIGS[equipment_id]
     min_rows = max(50, trial.seq_len + 1 if trial.model == "lstm" else 50)
 
+    split_failure_date = (
+        min(config.failure_dates)
+        if getattr(config, "failure_dates", None)
+        else config.failure_date
+    )
     splits = temporal_split(
         df_pre,
-        failure_date=config.failure_date,
+        failure_date=split_failure_date,
         exclusion_days=config.exclusion_days_before,
         val_start_date=trial.val_start,
         val_end_date=config.val_end_date,
@@ -520,13 +526,22 @@ def run_trial(
         scores = scores.copy()
         scores["is_anomaly"] = is_alarm
 
-    metrics = failure_detection_metrics(
-        scores,
-        config.failure_date,
-        prefailure_days=prefailure_days,
-        normal_end_days=normal_end_days,
-        consecutive=trial.debounce_consecutive,
-    )
+    if getattr(config, "failure_dates", None):
+        metrics = failure_detection_metrics_multi(
+            scores,
+            config.failure_dates,
+            prefailure_days=prefailure_days,
+            normal_end_days=normal_end_days,
+            consecutive=trial.debounce_consecutive,
+        )
+    else:
+        metrics = failure_detection_metrics(
+            scores,
+            config.failure_date,
+            prefailure_days=prefailure_days,
+            normal_end_days=normal_end_days,
+            consecutive=trial.debounce_consecutive,
+        )
 
     row = asdict(trial)
     row["val_start"] = trial.val_start.strftime("%Y-%m-%d") if trial.val_start else None

@@ -326,9 +326,14 @@ def _retrain_best(trial: TrialConfig, equipment_id: str, df_pre, device: str):
     from transpetro_modelos.data.splitting import temporal_split
 
     config = EQUIPMENT_CONFIGS[equipment_id]
+    split_failure_date = (
+        min(config.failure_dates)
+        if getattr(config, "failure_dates", None)
+        else config.failure_date
+    )
     splits = temporal_split(
         df_pre,
-        failure_date=config.failure_date,
+        failure_date=split_failure_date,
         exclusion_days=config.exclusion_days_before,
         val_start_date=trial.val_start,
         val_end_date=config.val_end_date,

@@ -25,6 +25,9 @@ class EquipmentConfig:
     # normal_alert_rate=0 e a constraint --max-fp-rate é silenciosamente desativada.
     prefailure_days: Optional[int] = None
     normal_end_days: Optional[int] = None
+    failure_dates: Optional[list] = field(default=None)
+    # Lista de datas de incidentes; se definida, usa min(failure_dates) como cutoff do split
+    # e avalia a detecção de forma agregada (média por incidente) em vez de um único evento.
 
 
 _THERMAL_VIB_FEATURES = [
@@ -499,6 +502,86 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         ],
         preprocessing_steps=deepcopy(_INTERPOLATED_PRESETS_LARA["baseline_interpolated"]),
         preprocess_presets=deepcopy(_INTERPOLATED_PRESETS_LARA),
+    ),
+    "cabiunas-TC382-03-2025": EquipmentConfig(
+        equipment_id="cabiunas-TC382-03-2025",
+        failure_date=datetime(2025, 4, 17, 22, 25),
+        failure_description="TC382_03_A HIHI 784°C — temperatura de rolamento crítica Cabiunas",
+        dataset_name="cabiunas-TC382-03-2025",
+        datetime_column="data_datetime",
+        exclusion_days_before=7,
+        local_feather="dados/cabiunas_TC382_03_2025.feather",
+        val_start_date=datetime(2025, 3, 1),
+        prefailure_days=14,
+        normal_end_days=60,
+        pre_split_steps=[
+            {"step": "filter_running", "column": "NGP_A", "threshold": 50.0},
+            {"step": "remove_transients", "minutes": 60, "gap_minutes": 30},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+        ],
+        preprocessing_steps=[
+            {"step": "clip"},
+            {"step": "normalize", "method": "robust"},
+        ],
+        preprocess_presets={
+            "baseline": [
+                {"step": "clip"},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "load_residual": [
+                {"step": "add_load_residual",
+                 "temp_columns": ["TC382_03_A"],
+                 "load_column": "NGP_A", "replace": True},
+                {"step": "clip"},
+                {"step": "normalize", "method": "robust"},
+            ],
+        },
+    ),
+    # Versão multi-incidente: 6 HIHI em 2025. Treina em dados até 14/jan (3d antes do 1º HIHI),
+    # valida em nov/dez 2024, avalia detecção na média dos 6 incidentes.
+    "cabiunas-TC382-03-multi-2025": EquipmentConfig(
+        equipment_id="cabiunas-TC382-03-multi-2025",
+        failure_date=datetime(2025, 4, 17, 22, 25),  # mais recente, mantido para compatibilidade
+        failure_dates=[
+            datetime(2025, 1, 17,  8, 20),   # HIHI 782°C
+            datetime(2025, 1, 19,  9, 31),   # HIHI 784°C
+            datetime(2025, 1, 29, 21, 46),   # HIHI 781°C
+            datetime(2025, 3, 18, 15, 40),   # HIHI 782°C
+            datetime(2025, 4, 10, 12, 32),   # HIHI 781°C
+            datetime(2025, 4, 17, 22, 25),   # HIHI 784°C
+        ],
+        failure_description="TC382_03_A — 6 incidentes HIHI 2025",
+        dataset_name="cabiunas-TC382-03-2025",
+        datetime_column="data_datetime",
+        exclusion_days_before=3,
+        local_feather="dados/cabiunas_TC382_03_2025.feather",
+        val_start_date=datetime(2024, 11, 1),
+        prefailure_days=14,
+        normal_end_days=60,   # normal_end = 17/jan - 60d = ~18/nov/2024
+        pre_split_steps=[
+            {"step": "filter_running", "column": "NGP_A", "threshold": 50.0},
+            {"step": "remove_transients", "minutes": 60, "gap_minutes": 30},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+        ],
+        preprocessing_steps=[
+            {"step": "clip"},
+            {"step": "normalize", "method": "robust"},
+        ],
+        preprocess_presets={
+            "baseline": [
+                {"step": "clip"},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "load_residual": [
+                {"step": "add_load_residual",
+                 "temp_columns": ["TC382_03_A"],
+                 "load_column": "NGP_A", "replace": True},
+                {"step": "clip"},
+                {"step": "normalize", "method": "robust"},
+            ],
+        },
     ),
 }
 
