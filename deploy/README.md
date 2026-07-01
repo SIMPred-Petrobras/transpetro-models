@@ -8,14 +8,16 @@ Fluxo para publicar um equipamento no Drive no padrão SIMPred
 - **`simpred_inference.py`** — núcleo de inferência reutilizável (carrega bundle → processa
   → infere). É copiado/usado pelos scripts de exemplo de cada equipamento.
 - **`Transpetro/`** — saída gerada pelo empacotamento (ignorada no git; é o que sobe pro Drive).
+- **`AUDITORIA_PRIMEIRO_DEPLOY.md`** — checagem local dos bundles já empacotados e dos pontos de
+  atenção antes de subir ao Drive.
 
 ## Equipamentos a publicar
 
-| Equip | Arquitetura | Config de treino | Observação |
+| Equip | Arquitetura no bundle atual | Config de treino | Observação |
 |---|---|---|---|
-| B-8802B | DENSE | `B-8802B` | resultado bom |
-| B-6511502A | DENSE | `B-6511502A` | resultado bom |
-| B-4064A | DENSE | `B-4064A-prod` | resultado bom (regime térmico) |
+| B-8802B | VAE | `B-8802B` | resultado bom; bundle executa localmente |
+| B-6511502A | VAE | `B-6511502A` | resultado bom; bundle executa localmente |
+| B-4064A | VAE | `B-4064A-prod` | **não subir como está para 2025+**; precisa re-baseline pós-reparo |
 | B-0302C | LSTM | `B-0302C` | fraco — documentado |
 | B-4703.24001B | VAE | `B-4703.24001B` | fraco — documentado |
 
