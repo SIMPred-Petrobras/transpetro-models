@@ -17,3 +17,9 @@ results/
 reports/
 # Saída do empacotamento para o Drive (material do Drive, não do repo)
 deploy/Transpetro/
+# Artefatos de build do Python
+build/
+# Decks gerados (binários pesados; versionamos só os geradores em deploy/decks/)
+deploy/*.pptx
+deploy/*.pdf
+deploy/*.html
