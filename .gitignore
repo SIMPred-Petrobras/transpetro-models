@@ -23,3 +23,5 @@ build/
 deploy/*.pptx
 deploy/*.pdf
 deploy/*.html
+# Pasta de trabalho dos geradores de deck (figuras/recortes intermediários)
+deploy/decks/_work/
