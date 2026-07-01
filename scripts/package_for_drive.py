@@ -224,8 +224,10 @@ import os
 import sys
 from pathlib import Path
 
-# simpred_inference.py está na raiz do pacote de deploy (ajuste o path se necessário).
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # .../Transpetro -> deploy root
+# simpred_inference.py acompanha este script (mesma pasta scripts/). Fallback: raiz do deploy.
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parents[2]))  # raiz acima de Transpetro/, se existir
 from simpred_inference import load_bundle, predict
 
 # Caminhos dos arquivos
@@ -329,9 +331,17 @@ def package(equipment: str, artifacts_dir: str | Path | None = None,
     else:
         print(f"  modelos : (pulado — rode com --artifacts-dir após retreinar; bundle = {bundle_name})")
 
-    # ── scripts/ ──
-    write_example_script(eq_dir / "scripts", equipment, bundle_name, data_name)
-    print(f"  scripts : scripts/{equipment.lower().replace('.', '').replace('-', '')}-exemplo.py")
+    # ── scripts/ (exemplo + simpred_inference.py para o bundle viajar autossuficiente) ──
+    scripts_dir = eq_dir / "scripts"
+    write_example_script(scripts_dir, equipment, bundle_name, data_name)
+    inf_src = PROJECT_ROOT / "deploy" / "simpred_inference.py"
+    if inf_src.exists():
+        shutil.copy(inf_src, scripts_dir / "simpred_inference.py")
+    # wheel do pacote (engenharia instala uma vez) — pega o mais recente em dist/
+    wheels = sorted((PROJECT_ROOT / "dist").glob("transpetro_modelos-*.whl"))
+    if wheels:
+        shutil.copy(wheels[-1], scripts_dir / wheels[-1].name)
+    print(f"  scripts : scripts/{equipment.lower().replace('.', '').replace('-', '')}-exemplo.py + simpred_inference.py")
 
     print(f"\n✓ {equipment} empacotado em: {eq_dir}")
     return eq_dir
