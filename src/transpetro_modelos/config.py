@@ -508,6 +508,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         failure_date=datetime(2025, 4, 17, 22, 25),
         failure_description="TC382_03_A HIHI 784°C — temperatura de rolamento crítica Cabiunas",
         dataset_name="cabiunas-TC382-03-2025",
+        dataset_file_stem="cabiunas_TC382_03_2025",
         datetime_column="data_datetime",
         exclusion_days_before=7,
         local_feather="dados/cabiunas_TC382_03_2025.feather",
@@ -543,6 +544,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
     "cabiunas-TC382-03-multi-2025": EquipmentConfig(
         equipment_id="cabiunas-TC382-03-multi-2025",
         failure_date=datetime(2025, 4, 17, 22, 25),  # mais recente, mantido para compatibilidade
+        dataset_file_stem="cabiunas_TC382_03_2025",
         failure_dates=[
             datetime(2025, 1, 17,  8, 20),   # HIHI 782°C
             datetime(2025, 1, 19,  9, 31),   # HIHI 784°C
