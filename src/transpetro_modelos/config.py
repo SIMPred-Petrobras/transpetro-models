@@ -478,8 +478,22 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "filter_running", "column": "Corrente", "threshold": 1},
             {"step": "remove_transients", "minutes": 10},
         ],
-        preprocessing_steps=deepcopy(_INTERPOLATED_PRESETS_LARA["baseline_interpolated"]),
-        preprocess_presets=deepcopy(_INTERPOLATED_PRESETS_LARA),
+        # normalize=robust inline (fiel ao modelo validado da Lara; _INTERPOLATED_PRESETS_LARA da main é 'standard')
+        preprocessing_steps=[
+            {"step": "clip"},
+            {"step": "normalize", "method": "robust"},
+        ],
+        preprocess_presets={
+            "baseline_interpolated": [
+                {"step": "clip"},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "moving_average_interpolated": [
+                {"step": "moving_average", "window": 3, "min_periods": 1},
+                {"step": "clip"},
+                {"step": "normalize", "method": "robust"},
+            ],
+        },
     ),
     "B-90001A_interpolated": EquipmentConfig(
         equipment_id="B-90001A_interpolated",
