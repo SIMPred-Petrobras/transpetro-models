@@ -35,7 +35,8 @@ def filter_threshold(
     df: pd.DataFrame,
     columns: list[str],
     threshold,
-    mode: str = "all"
+    mode: str = "all",
+    fixed_thresholds: dict[str, float] | None = None,
 ) -> pd.DataFrame:
 
     existing = [c for c in columns if c in df.columns]
@@ -47,12 +48,7 @@ def filter_threshold(
     # CASO 1: threshold fixo (float)
     # -------------------------
     if isinstance(threshold, (int, float)):
-        if mode == "any":
-            mask = df[existing].gt(threshold).any(axis=1)
-        elif mode == "all":
-            mask = df[existing].gt(threshold).all(axis=1)
-        else:
-            raise ValueError("mode must be 'any' or 'all'")
+        flags = df[existing].gt(threshold)
 
     # -------------------------
     # CASO 2: threshold por coluna (dict)
@@ -64,13 +60,6 @@ def filter_threshold(
             if col in threshold
         })
 
-        if mode == "any":
-            mask = flags.any(axis=1)
-        elif mode == "all":
-            mask = flags.all(axis=1)
-        else:
-            raise ValueError("mode must be 'any' or 'all'")
-
     # -------------------------
     # CASO 3: OTSU automático
     # -------------------------
@@ -80,20 +69,24 @@ def filter_threshold(
             for col in existing
         }
 
+        # Sobrescreve os thresholds das variáveis desejadas
+        if fixed_thresholds is not None:
+            th_dict.update(fixed_thresholds)
+
         flags = pd.DataFrame({
             col: df[col] > th_dict[col]
             for col in existing
         })
 
-        if mode == "any":
-            mask = flags.any(axis=1)
-        elif mode == "all":
-            mask = flags.all(axis=1)
-        else:
-            raise ValueError("mode must be 'any' or 'all'")
-
     else:
         raise ValueError("threshold must be float, dict or 'otsu'")
+
+    if mode == "any":
+        mask = flags.any(axis=1)
+    elif mode == "all":
+        mask = flags.all(axis=1)
+    else:
+        raise ValueError("mode must be 'any' or 'all'")
 
     return df[mask].copy()
 
