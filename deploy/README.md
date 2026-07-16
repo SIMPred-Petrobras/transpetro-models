@@ -8,8 +8,15 @@ Fluxo para publicar um equipamento no Drive no padrão SIMPred
 - **`simpred_inference.py`** — núcleo de inferência reutilizável (carrega bundle → processa
   → infere). É copiado/usado pelos scripts de exemplo de cada equipamento.
 - **`Transpetro/`** — saída gerada pelo empacotamento (ignorada no git; é o que sobe pro Drive).
+- **`GUIA_INTEGRACAO_DRIVE.md`** — guia de integração para o time de engenharia (passo a passo,
+  contratos de entrada/saída, calibração dos limiares, proveniência dos modelos). É a **fonte**
+  do `Transpetro/README.md` e do `Transpetro/Guia_Integracao_SIMPred.docx` que sobem pro Drive —
+  ao editar, re-copiar/reconverter (ver Passo 4).
 - **`AUDITORIA_PRIMEIRO_DEPLOY.md`** — checagem local dos bundles já empacotados e dos pontos de
   atenção antes de subir ao Drive.
+
+> Material de **apresentação** (decks, notas) fica em `presentations/` — este diretório contém
+> só o entregável de integração.
 
 ## Equipamentos a publicar
 
@@ -101,6 +108,16 @@ Deve imprimir o nº de amostras pontuadas e os alertas (concentrados perto da fa
 ## Passo 4 — Subir para o Drive
 
 Arraste `deploy/Transpetro/<EQUIP>/` para a pasta do Drive, dentro de `Transpetro/`.
+
+Na **raiz** do `Transpetro/` do Drive devem estar também (subir junto na primeira vez e
+re-subir quando o guia mudar):
+
+- `README.md` — cópia de `deploy/GUIA_INTEGRACAO_DRIVE.md`;
+- `Guia_Integracao_SIMPred.docx` — mesma coisa em Word (gerado do markdown via
+  `markdown → HTML → soffice --convert-to docx`).
+
+Se os números de um bundle mudarem (retreino/recalibração), **atualize o guia** (§1, §6 e §7)
+antes de re-subir.
 
 ## O bundle de inferência
 
