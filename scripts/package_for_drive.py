@@ -61,6 +61,8 @@ REGISTRY = {
                       "docs": ["analise_b0302c.md"]},
     "B-4703.24001B": {"config": "B-4703.24001B", "arch": "VAE",   "type": "Bomba",
                       "docs": []},
+    "B-3403C":       {"config": "B-3403C_interpolated", "arch": "DENSE", "type": "Bomba",
+                      "docs": []},
 }
 
 
@@ -282,11 +284,13 @@ if __name__ == "__main__":
 
 
 def package(equipment: str, artifacts_dir: str | Path | None = None,
-            out_root: str | Path | None = None) -> Path:
+            out_root: str | Path | None = None, from_clearml: bool = False) -> Path:
     """Monta a árvore SIMPred de um equipamento. Retorna o diretório do equipamento.
 
     Se `artifacts_dir` for dado (pasta com best_model/preprocessing/best_trial), monta
-    também a pasta `modelos/`; senão, gera tudo menos o bundle do modelo."""
+    também a pasta `modelos/`; senão, gera tudo menos o bundle do modelo.
+    `from_clearml=True` baixa os dados do ClearML Dataset (útil quando o feather do
+    equipamento não está local, ex.: os datasets interpolados da Lara)."""
     if equipment not in REGISTRY:
         raise ValueError(f"Equipamento {equipment!r} não está no REGISTRY: {list(REGISTRY)}")
     reg = REGISTRY[equipment]
@@ -296,7 +300,7 @@ def package(equipment: str, artifacts_dir: str | Path | None = None,
     eq_dir.mkdir(parents=True, exist_ok=True)
 
     # ── dados: feather -> dados/<periodo>/data_<inicio>_<fim>_raw.csv ──
-    df = load_equipment_data(config_key, from_clearml=False)
+    df = load_equipment_data(config_key, from_clearml=from_clearml)
     lo, hi = str(df.index.min())[:10], str(df.index.max())[:10]
     period = f"{lo[:4]}_{hi[:4]}"
     dados_dir = eq_dir / "dados" / period

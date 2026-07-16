@@ -103,6 +103,8 @@ def main():
     ap.add_argument("--out", default=None, help="Raiz de saída (default: deploy/Transpetro).")
     ap.add_argument("--keep-artifacts", action="store_true",
                     help="Mantém a pasta temporária com os artefatos baixados.")
+    ap.add_argument("--from-clearml", action="store_true",
+                    help="Baixa os dados do ClearML Dataset (quando o feather não está local).")
     args = ap.parse_args()
 
     task = _get_task(args.task_id, args.task_name, args.project)
@@ -110,7 +112,7 @@ def main():
 
     tmp = Path(tempfile.mkdtemp(prefix=f"fetch_{args.equipment}_"))
     fetch_to_artifacts_dir(task, tmp)
-    package(args.equipment, artifacts_dir=tmp, out_root=args.out)
+    package(args.equipment, artifacts_dir=tmp, out_root=args.out, from_clearml=args.from_clearml)
 
     if args.keep_artifacts:
         print(f"  (artefatos brutos mantidos em {tmp})")

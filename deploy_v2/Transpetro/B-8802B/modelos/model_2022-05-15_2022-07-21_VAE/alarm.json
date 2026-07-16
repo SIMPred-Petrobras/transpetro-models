@@ -1,0 +1,32 @@
+{
+  "model_type": "vae",
+  "threshold": 0.3899962949752798,
+  "debounce_consecutive": 6,
+  "seq_len": 24,
+  "preset": "baseline",
+  "features": [
+    "Pressão Sucção",
+    "Pressão Descarga",
+    "Vibração Bomba LA",
+    "Vibração Bomba LNA",
+    "Temperatura Bomba LA"
+  ],
+  "trained_metrics": {
+    "prefailure_alert_rate": 0.8748832866479925,
+    "normal_alert_rate": 0.022124737745565518,
+    "val_fp_rate_heldout": 0.007097791798107256,
+    "composite_score": 0.8555267233729272
+  },
+  "threshold_attention": 0.2102846503257751,
+  "threshold_calibration": {
+    "fp_alarm_target": 0.01,
+    "fp_attention_target": 0.05,
+    "fp_alarm_measured": 0.0101,
+    "fp_attention_measured": 0.0501,
+    "normal_window": {
+      "start": "2022-05-15 18:25:00",
+      "end": "2022-06-29 08:45:00",
+      "n_points": 6649
+    }
+  }
+}

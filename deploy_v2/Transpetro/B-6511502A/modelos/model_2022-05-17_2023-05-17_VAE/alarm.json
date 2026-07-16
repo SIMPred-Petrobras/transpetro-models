@@ -1,0 +1,41 @@
+{
+  "model_type": "vae",
+  "threshold": 0.6322227457761991,
+  "debounce_consecutive": 6,
+  "seq_len": 24,
+  "preset": "baseline",
+  "features": [
+    "CORRENTE ELÉTRICA DO MOTOR",
+    "PRESSÃO SUCÇÃO",
+    "PRESSÃO DESCARGA",
+    "DESLOC. AXIAL EIXO BB LNA 1 ZE-50",
+    "DESLOC. AXIAL EIXO BB LNA 2 ZE-51",
+    "TEMP. MANCAL LNA MOT TE-07A1/A2",
+    "VIB. MANCAL RADIAL BB LA 0° VE-50C",
+    "VIB. MANCAL RADIAL BB LA 90° VE-51C",
+    "VIB. MANCAL RADIAL BB LNA 0° VE-50D",
+    "VIB. MANCAL RADIAL BB LNA 90° VE-51D",
+    "VIB. MANCAL RADIAL MOT LA 0° VE-51B",
+    "VIB. MANCAL RADIAL MOT LA 90° VE-50B",
+    "VIB. MANCAL RADIAL MOT LNA 0° VE-50A",
+    "VIB. MANCAL RADIAL MOT LNA 90° VE-51A"
+  ],
+  "trained_metrics": {
+    "prefailure_alert_rate": 1.0,
+    "normal_alert_rate": 0.003725995987388937,
+    "val_fp_rate_heldout": 0.0014214641080312722,
+    "composite_score": 0.996274004012611
+  },
+  "threshold_attention": 0.3250025040328503,
+  "threshold_calibration": {
+    "fp_alarm_target": 0.0045,
+    "fp_attention_target": 0.0498,
+    "fp_alarm_measured": 0.0045,
+    "fp_attention_measured": 0.0498,
+    "normal_window": {
+      "start": "2022-05-20 17:20:00",
+      "end": "2023-04-18 20:40:00",
+      "n_points": 34890
+    }
+  }
+}

@@ -1,0 +1,52 @@
+[
+  {
+    "step": "remove_sensor_errors",
+    "error_values": [
+      32767.0
+    ]
+  },
+  {
+    "step": "filter_running",
+    "column": "CORRENTE ELÉTRICA DO MOTOR",
+    "threshold": 60.0
+  },
+  {
+    "step": "remove_transients",
+    "minutes": 15
+  },
+  {
+    "step": "resample",
+    "freq": "5min"
+  },
+  {
+    "step": "ffill",
+    "limit": 4
+  },
+  {
+    "step": "select_features",
+    "features": [
+      "CORRENTE ELÉTRICA DO MOTOR",
+      "PRESSÃO SUCÇÃO",
+      "PRESSÃO DESCARGA",
+      "DESLOC. AXIAL EIXO BB LNA 1 ZE-50",
+      "DESLOC. AXIAL EIXO BB LNA 2 ZE-51",
+      "TEMP. MANCAL LNA MOT TE-07A1/A2",
+      "VIB. MANCAL RADIAL BB LA 0° VE-50C",
+      "VIB. MANCAL RADIAL BB LA 90° VE-51C",
+      "VIB. MANCAL RADIAL BB LNA 0° VE-50D",
+      "VIB. MANCAL RADIAL BB LNA 90° VE-51D",
+      "VIB. MANCAL RADIAL MOT LA 0° VE-51B",
+      "VIB. MANCAL RADIAL MOT LA 90° VE-50B",
+      "VIB. MANCAL RADIAL MOT LNA 0° VE-50A",
+      "VIB. MANCAL RADIAL MOT LNA 90° VE-51A"
+    ]
+  },
+  {
+    "step": "clip",
+    "upper_pct": 99.9
+  },
+  {
+    "step": "normalize",
+    "method": "robust"
+  }
+]

@@ -1,0 +1,44 @@
+[
+  {
+    "step": "remove_sensor_errors",
+    "error_values": [
+      0.0
+    ]
+  },
+  {
+    "step": "filter_running",
+    "column": "Pressão Descarga",
+    "threshold": 35.0
+  },
+  {
+    "step": "resample",
+    "freq": "5min"
+  },
+  {
+    "step": "ffill",
+    "limit": 4
+  },
+  {
+    "step": "remove_transients",
+    "minutes": 90,
+    "gap_minutes": 30
+  },
+  {
+    "step": "select_features",
+    "features": [
+      "Pressão Sucção",
+      "Pressão Descarga",
+      "Vibração Bomba LA",
+      "Vibração Bomba LNA",
+      "Temperatura Bomba LA"
+    ]
+  },
+  {
+    "step": "clip",
+    "upper_pct": 99.9
+  },
+  {
+    "step": "normalize",
+    "method": "robust"
+  }
+]

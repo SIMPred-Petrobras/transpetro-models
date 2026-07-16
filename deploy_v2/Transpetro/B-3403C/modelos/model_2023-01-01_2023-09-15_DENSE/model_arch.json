@@ -1,0 +1,9 @@
+{
+  "model_type": "dense",
+  "input_dim": 12,
+  "encoding_layers": [
+    256,
+    128,
+    64
+  ]
+}

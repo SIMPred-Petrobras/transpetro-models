@@ -1,0 +1,50 @@
+{
+  "Corrente": [
+    74.0,
+    131.0
+  ],
+  "Press Desc": [
+    63.943703842,
+    109.95576680333332
+  ],
+  "Press Suc": [
+    36.873912812333344,
+    78.24265746966665
+  ],
+  "Press\u00e3o Lubrifica\u00e7\u00e3o": [
+    4.8462120850999995,
+    6.353566725933332
+  ],
+  "Temperatura Enrolamento": [
+    48.74666595666652,
+    95.89333342399999
+  ],
+  "Temperatura Lubrifica\u00e7\u00e3o Tanque": [
+    49.37337544666665,
+    79.16380233499999
+  ],
+  "Temperatura Mancal Bomba LA": [
+    63.451551053,
+    76.442905424
+  ],
+  "Temperatura Mancal Bomba LNA Axial": [
+    67.48418414033335,
+    85.33531926666669
+  ],
+  "Temperatura Mancal Bomba LNA Radial": [
+    62.810790253,
+    80.82571716333334
+  ],
+  "Temperatura Mancal Motor LA": [
+    53.38011131433333,
+    77.98802032366666
+  ],
+  "Temperatura Mancal Motor LNA": [
+    61.56617253533332,
+    81.04048462033333
+  ],
+  "Vibra\u00e7\u00e3o": [
+    1.531505815366661,
+    5.335740280199988
+  ]
+}

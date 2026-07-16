@@ -1,0 +1,23 @@
+[
+  {
+    "step": "filter_running",
+    "column": "Corrente",
+    "threshold": 1
+  },
+  {
+    "step": "remove_transients",
+    "minutes": 10
+  },
+  {
+    "step": "moving_average",
+    "window": 3,
+    "min_periods": 1
+  },
+  {
+    "step": "clip"
+  },
+  {
+    "step": "normalize",
+    "method": "standard"
+  }
+]

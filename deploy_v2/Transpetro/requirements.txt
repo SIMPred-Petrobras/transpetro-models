@@ -1,0 +1,11 @@
+# Dependências do pacote de inferência SIMPred (deploy_v2).
+# Versões testadas no ambiente de treino (Python 3.12).
+#
+# IMPORTANTE: scaler.pkl é um pickle de sklearn.preprocessing.RobustScaler, então
+# a versão do scikit-learn precisa ser compatível com a usada no treino (1.8.x).
+# Para torch, ajuste a build conforme o ambiente (CPU vs CUDA) — a inferência roda em CPU.
+
+numpy>=2.4,<3
+pandas>=3.0,<4
+scikit-learn>=1.8,<1.9
+torch>=2.11,<3

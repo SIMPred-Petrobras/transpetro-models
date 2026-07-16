@@ -19,9 +19,15 @@ reports/
 deploy/Transpetro/
 # Artefatos de build do Python
 build/
-# Decks gerados (binários pesados; versionamos só os geradores em deploy/decks/)
-deploy/*.pptx
-deploy/*.pdf
-deploy/*.html
-# Pasta de trabalho dos geradores de deck (figuras/recortes intermediários)
-deploy/decks/_work/
+# Apresentação: geradores de deck e material de slide NÃO vão pro repo (ficam no Canva)
+presentations/
+# Binários de apresentação gerados (slides), onde estiverem
+*.pptx
+*.pdf
+*.html
+# deploy_v2: dados brutos de exemplo (pesados) e saídas de inferência geradas ao rodar.
+# Os bundles (model_state.pt/scaler.pkl/*.json), o módulo, scripts e README SÃO versionados.
+deploy_v2/Transpetro/*/dados/
+deploy_v2/Transpetro/*/scripts/*_inferencia.csv
+# exceção à regra global "*.pt": os pesos do bundle de deploy DEVEM ser versionados
+!deploy_v2/Transpetro/*/modelos/*/model_state.pt
