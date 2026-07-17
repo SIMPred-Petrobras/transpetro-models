@@ -1,6 +1,6 @@
 {
   "model_type": "dense",
-  "threshold": 0.007557880599051729,
+  "threshold": 0.012356974417343736,
   "debounce_consecutive": 6,
   "seq_len": 24,
   "preset": "moving_average_interpolated",
@@ -11,16 +11,27 @@
     "val_fp_rate_heldout": 0.009399394615262067,
     "composite_score": 0.011021368299300784
   },
-  "threshold_attention": 0.0032982127740979195,
+  "threshold_attention": 0.009559575701132417,
   "threshold_calibration": {
-    "fp_alarm_target": 0.01,
-    "fp_attention_target": 0.05,
-    "fp_alarm_measured": 0.01,
-    "fp_attention_measured": 0.05,
+    "method": "sigma",
+    "mean_normal": 0.0011673795524984598,
+    "std_normal": 0.0013986993581056595,
+    "y_alarm": 8.0,
+    "y_attention": 6.0,
+    "fp_alarm_target": null,
+    "fp_attention_target": null,
+    "fp_alarm_measured": 0.0,
+    "fp_attention_measured": 0.0007,
+    "persistence": {
+      "k": 15,
+      "n": 20
+    },
     "normal_window": {
       "start": "2023-01-01 07:52:00",
-      "end": "2023-08-13 16:13:00",
-      "n_points": 149581
+      "end": "2023-08-21 08:03:00",
+      "n_points": 154368
     }
-  }
+  },
+  "debounce_window": 20,
+  "debounce_min": 15
 }

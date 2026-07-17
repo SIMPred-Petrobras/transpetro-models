@@ -282,7 +282,10 @@ def prever(bundle_dir, model, df_proc: pd.DataFrame) -> pd.DataFrame:
     alarm = json.loads((bundle_dir / "alarm.json").read_text())
     threshold = float(alarm["threshold"])              # nível de ALARME
     atencao = alarm.get("threshold_attention")         # nível de ATENÇÃO (< alarme)
-    debounce = int(alarm.get("debounce_consecutive", 1))
+    # persistência k-de-n: exige `debounce_min` de `debounce_window` pontos acima do limite.
+    # Compat: sem esses campos, usa `debounce_consecutive` como k=n (k pontos consecutivos).
+    n_persist = int(alarm.get("debounce_window", alarm.get("debounce_consecutive", 1)))
+    k_persist = int(alarm.get("debounce_min", alarm.get("debounce_consecutive", 1)))
 
     x = torch.tensor(df_proc.values, dtype=torch.float32)
     with torch.no_grad():
@@ -292,10 +295,10 @@ def prever(bundle_dir, model, df_proc: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame({"reconstruction_error": erro}, index=df_proc.index)
     acima = out["reconstruction_error"] > threshold
 
-    # debounce: exige `debounce` pontos consecutivos acima do limite
-    if debounce > 1:
-        cont = acima.astype(int).rolling(debounce, min_periods=debounce).sum()
-        acima = (cont >= debounce).fillna(False)
+    # dispara só quando `k_persist` dos últimos `n_persist` pontos passam do limite
+    if n_persist > 1:
+        cont = acima.astype(int).rolling(n_persist, min_periods=n_persist).sum()
+        acima = (cont >= k_persist).fillna(False)
     out["is_anomaly"] = acima
 
     sev = pd.Series("normal", index=out.index, dtype=object)

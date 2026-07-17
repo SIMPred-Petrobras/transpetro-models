@@ -53,12 +53,24 @@ def _find_data(bundle_dir: Path) -> Path:
     return matches[0]
 
 
+def _persist(flags: pd.Series, k: int, n: int) -> pd.Series:
+    """Filtro de persistência k-de-n: dispara quando k dos últimos n pontos passam."""
+    if n <= 1:
+        return flags.astype(bool)
+    return (flags.astype(int).rolling(n, min_periods=n).sum() >= k).fillna(False)
+
+
 def recalibrate(
     bundle_dir: Path,
     data_file: Path,
     normal_end: str | None,
+    method: str,
     fp_alarm: float,
     fp_attention: float,
+    y_alarm: float,
+    y_attention: float,
+    persist_window: int | None,
+    persist_min: int | None,
     failure_date: str | None,
 ) -> dict:
     bundle = load_bundle(bundle_dir)
@@ -71,23 +83,44 @@ def recalibrate(
             f"Janela normal tem só {len(normal)} pontos — confira --normal-end ({normal_end})."
         )
 
-    thr_alarm = float(normal.quantile(1.0 - fp_alarm))
-    thr_attention = float(normal.quantile(1.0 - fp_attention))
-    if thr_attention >= thr_alarm:  # metas degeneradas; desativa o nível de atenção
+    # persistência (k-de-n); sem --persist-*, cai no debounce do bundle (k=n consecutivos)
+    if persist_window:
+        n = int(persist_window)
+        k = int(persist_min) if persist_min else n
+    else:
+        n = k = int(getattr(bundle, "debounce_consecutive", 1) or 1)
+
+    mu, sd = float(normal.mean()), float(normal.std())
+    if method == "sigma":
+        # threshold = média + y·desvio-padrão dos erros na janela normal (régua interpretável)
+        thr_alarm = mu + y_alarm * sd
+        thr_attention = mu + y_attention * sd
+    else:  # método "fp": quantil que atinge a meta de falso positivo
+        thr_alarm = float(normal.quantile(1.0 - fp_alarm))
+        thr_attention = float(normal.quantile(1.0 - fp_attention))
+    if thr_attention >= thr_alarm:  # degenera; desativa o nível de atenção
         thr_attention = None
 
-    # FP efetivo medido na janela normal (sanity check da calibração)
-    fp_alarm_meas = float((normal > thr_alarm).mean())
-    fp_att_meas = float((normal > thr_attention).mean()) if thr_attention is not None else None
+    # FP efetivo medido na janela normal, JÁ com a persistência (reflete o deploy)
+    fp_alarm_meas = float(_persist(normal > thr_alarm, k, n).mean())
+    fp_att_meas = (float(_persist(normal > thr_attention, k, n).mean())
+                   if thr_attention is not None else None)
 
     report = {
         "old_threshold": float(bundle.threshold),
         "threshold": thr_alarm,
         "threshold_attention": thr_attention,
-        "fp_alarm_target": fp_alarm,
-        "fp_attention_target": fp_attention,
+        "method": method,
+        "mean_normal": mu,
+        "std_normal": sd,
+        "y_alarm": y_alarm if method == "sigma" else round((thr_alarm - mu) / (sd + 1e-12), 2),
+        "y_attention": (y_attention if method == "sigma"
+                        else (round((thr_attention - mu) / (sd + 1e-12), 2) if thr_attention is not None else None)),
+        "fp_alarm_target": fp_alarm if method == "fp" else None,
+        "fp_attention_target": fp_attention if method == "fp" else None,
         "fp_alarm_measured": round(fp_alarm_meas, 4),
         "fp_attention_measured": round(fp_att_meas, 4) if fp_att_meas is not None else None,
+        "persistence": {"k": k, "n": n},
         "normal_window": {
             "start": str(normal.index.min()),
             "end": str(normal.index.max()),
@@ -95,16 +128,18 @@ def recalibrate(
         },
     }
 
-    # detecção na janela de pré-falha (se a data da falha for informada)
+    # detecção na janela de pré-falha (persistência aplicada na série inteira, depois recortada)
     if failure_date:
         fd = pd.to_datetime(failure_date)
         start = pd.to_datetime(normal_end) if normal_end else errors.index.min()
-        pre = errors[(errors.index >= start) & (errors.index < fd)]
-        if len(pre):
-            crosses = pre.index[pre > thr_alarm]
+        fl = _persist(errors > thr_alarm, k, n)
+        pre_mask = (errors.index >= start) & (errors.index < fd)
+        if pre_mask.sum():
+            fl_pre = fl[pre_mask]
+            crosses = fl_pre.index[fl_pre]
             report["prefailure"] = {
                 "window": f"{start.date()} -> {fd.date()}",
-                "detection_rate": round(float((pre > thr_alarm).mean()), 4),
+                "detection_rate": round(float(fl_pre.mean()), 4),
                 "first_alarm": str(crosses.min()) if len(crosses) else None,
             }
 
@@ -113,9 +148,15 @@ def recalibrate(
     alarm = json.loads(alarm_path.read_text())
     alarm["threshold"] = thr_alarm
     alarm["threshold_attention"] = thr_attention
+    if n > 1:
+        alarm["debounce_window"] = n
+        alarm["debounce_min"] = k
     alarm["threshold_calibration"] = {
-        k: report[k] for k in ("fp_alarm_target", "fp_attention_target",
-                               "fp_alarm_measured", "fp_attention_measured", "normal_window")
+        key: report[key] for key in (
+            "method", "mean_normal", "std_normal", "y_alarm", "y_attention",
+            "fp_alarm_target", "fp_attention_target", "fp_alarm_measured",
+            "fp_attention_measured", "persistence", "normal_window",
+        )
     }
     alarm_path.write_text(json.dumps(alarm, ensure_ascii=False, indent=2))
     return report
@@ -127,8 +168,14 @@ def main():
     ap.add_argument("--bundle-dir", help="Caminho direto do bundle (alternativa a --equipment).")
     ap.add_argument("--data", help="CSV bruto (default: o *_raw.csv do próprio equipamento).")
     ap.add_argument("--normal-end", help="Fim da janela normal (YYYY-MM-DD); deixe margem antes da falha.")
-    ap.add_argument("--fp-alarm", type=float, default=0.01, help="Meta de FP do alarme (default 0.01).")
-    ap.add_argument("--fp-attention", type=float, default=0.05, help="Meta de FP da atenção (default 0.05).")
+    ap.add_argument("--method", choices=["fp", "sigma"], default="fp",
+                    help="Régua do threshold: 'fp' (quantil por meta de FP) ou 'sigma' (média + y·desvio).")
+    ap.add_argument("--fp-alarm", type=float, default=0.01, help="[fp] Meta de FP do alarme (default 0.01).")
+    ap.add_argument("--fp-attention", type=float, default=0.05, help="[fp] Meta de FP da atenção (default 0.05).")
+    ap.add_argument("--y-alarm", type=float, default=4.0, help="[sigma] nº de desvios p/ o alarme (default 4).")
+    ap.add_argument("--y-attention", type=float, default=3.0, help="[sigma] nº de desvios p/ a atenção (default 3).")
+    ap.add_argument("--persist-window", type=int, default=None, help="Persistência: janela n (k-de-n).")
+    ap.add_argument("--persist-min", type=int, default=None, help="Persistência: mínimo k (default = n).")
     ap.add_argument("--failure-date", help="Data da falha conhecida (YYYY-MM-DD) p/ relatar detecção.")
     ap.add_argument("--out", default=None, help="Raiz dos bundles (default: deploy/Transpetro).")
     args = ap.parse_args()
@@ -144,15 +191,26 @@ def main():
 
     print(f"bundle: {bundle_dir}")
     print(f"dados : {data_file.name}")
-    r = recalibrate(bundle_dir, data_file, args.normal_end, args.fp_alarm,
-                    args.fp_attention, args.failure_date)
+    r = recalibrate(bundle_dir, data_file, args.normal_end, args.method,
+                    args.fp_alarm, args.fp_attention, args.y_alarm, args.y_attention,
+                    args.persist_window, args.persist_min, args.failure_date)
 
     print("\n── recalibração ──")
-    print(f"  threshold (alarme) : {r['old_threshold']:.4f} -> {r['threshold']:.4f}  "
-          f"(meta {r['fp_alarm_target']:.0%} FP, medido {r['fp_alarm_measured']:.2%})")
-    if r["threshold_attention"] is not None:
-        print(f"  threshold (atenção): {r['threshold_attention']:.4f}  "
-              f"(meta {r['fp_attention_target']:.0%} FP, medido {r['fp_attention_measured']:.2%})")
+    p = r["persistence"]
+    if r["method"] == "sigma":
+        print(f"  método             : μ + y·σ  (μ={r['mean_normal']:.5f}, σ={r['std_normal']:.5f})")
+        print(f"  threshold (alarme) : {r['old_threshold']:.4f} -> {r['threshold']:.4f}  "
+              f"(y={r['y_alarm']}, FP medido {r['fp_alarm_measured']:.2%})")
+        if r["threshold_attention"] is not None:
+            print(f"  threshold (atenção): {r['threshold_attention']:.4f}  "
+                  f"(y={r['y_attention']}, FP medido {r['fp_attention_measured']:.2%})")
+    else:
+        print(f"  threshold (alarme) : {r['old_threshold']:.4f} -> {r['threshold']:.4f}  "
+              f"(meta {r['fp_alarm_target']:.0%} FP, medido {r['fp_alarm_measured']:.2%})")
+        if r["threshold_attention"] is not None:
+            print(f"  threshold (atenção): {r['threshold_attention']:.4f}  "
+                  f"(meta {r['fp_attention_target']:.0%} FP, medido {r['fp_attention_measured']:.2%})")
+    print(f"  persistência       : {p['k']}-de-{p['n']}")
     nw = r["normal_window"]
     print(f"  janela normal      : {nw['start']} -> {nw['end']}  ({nw['n_points']} pts)")
     if "prefailure" in r:

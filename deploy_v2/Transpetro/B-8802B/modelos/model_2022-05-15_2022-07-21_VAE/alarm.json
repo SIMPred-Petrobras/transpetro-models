@@ -1,6 +1,6 @@
 {
   "model_type": "vae",
-  "threshold": 0.3899962949752798,
+  "threshold": 0.44433512538671494,
   "debounce_consecutive": 6,
   "seq_len": 24,
   "preset": "baseline",
@@ -17,16 +17,27 @@
     "val_fp_rate_heldout": 0.007097791798107256,
     "composite_score": 0.8555267233729272
   },
-  "threshold_attention": 0.2102846503257751,
+  "threshold_attention": 0.3531247302889824,
   "threshold_calibration": {
-    "fp_alarm_target": 0.01,
-    "fp_attention_target": 0.05,
-    "fp_alarm_measured": 0.0101,
-    "fp_attention_measured": 0.0501,
+    "method": "sigma",
+    "mean_normal": 0.07949354499578476,
+    "std_normal": 0.09121039509773254,
+    "y_alarm": 4.0,
+    "y_attention": 3.0,
+    "fp_alarm_target": null,
+    "fp_attention_target": null,
+    "fp_alarm_measured": 0.0,
+    "fp_attention_measured": 0.0011,
+    "persistence": {
+      "k": 6,
+      "n": 6
+    },
     "normal_window": {
       "start": "2022-05-15 18:25:00",
-      "end": "2022-06-29 08:45:00",
-      "n_points": 6649
+      "end": "2022-06-28 09:55:00",
+      "n_points": 6550
     }
-  }
+  },
+  "debounce_window": 6,
+  "debounce_min": 6
 }
