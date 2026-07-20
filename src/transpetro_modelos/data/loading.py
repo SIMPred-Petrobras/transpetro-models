@@ -13,7 +13,7 @@ def load_equipment_data(equipment_id: str, from_clearml: bool = True) -> pd.Data
     Se from_clearml=True, baixa do ClearML Dataset; caso contrário lê local.
     """
     config = EQUIPMENT_CONFIGS[equipment_id]
-
+    
     if from_clearml:
         from clearml import Dataset
         ds = Dataset.get(

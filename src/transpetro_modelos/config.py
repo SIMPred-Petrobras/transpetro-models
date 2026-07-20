@@ -164,11 +164,29 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         val_start_date=datetime(2024, 11, 27),
         val_end_date=datetime(2024, 12, 27),
         pre_split_steps=[
-            {"step": "filter_threshold", "columns": ['VIBRAÇÃO DO MANCAL BOMBA LA', 'VIBRAÇÃO DO MANCAL BOMBA LNA ', 'VIBRAÇÃO DO MANCAL MOTOR LA (003)', 'VIBRAÇÃO DO MANCAL MOTOR LA (004)', 'VIBRAÇÃO DO MANCAL MOTOR LNA (005)', 'VIBRAÇÃO DO MANCAL MOTOR LNA (006)'], "threshold": "otsu", "mode": "all"},
+            {"step": "filter_threshold", "columns": ['VIBRAÇÃO DO MANCAL BOMBA LA', 'VIBRAÇÃO DO MANCAL BOMBA LNA ', 'VIBRAÇÃO DO MANCAL MOTOR LA (003)', 'VIBRAÇÃO DO MANCAL MOTOR LA (004)', 'VIBRAÇÃO DO MANCAL MOTOR LNA (006)'], "threshold": "otsu", "mode": "all", "fixed_thresholds": { 'VIBRAÇÃO DO MANCAL MOTOR LNA (005)': 9}},
             {"step": "remove_transients", "minutes": 10},
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
         preprocess_presets=INTERPOLATED_PRESETS,
+    ),
+
+    "B-8801C_interpolated": EquipmentConfig(
+        equipment_id="B-8801C_interpolated",
+        failure_date=datetime(2024, 7, 5),
+        failure_description="Vibração elevada mancal LA motor e bomba",
+        dataset_name="transpetro-b-8801c_interpolated",
+        datetime_column="Timestamp",
+        exclusion_days_before=10,
+        local_feather="Dados/B-8801C.csv",
+        val_start_date=datetime(2024, 5, 1),
+        val_end_date=datetime(2024, 6, 25),
+        pre_split_steps=[
+            {"step": "filter_running", "column": "Corrente", "threshold": 1},
+            {"step": "remove_transients", "minutes": 10},
+        ],
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
+        preprocess_presets=INTERPOLATED_PRESETS,    
     )
 }
 
