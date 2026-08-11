@@ -44,7 +44,7 @@ def load_alarm_events(
     from_clearml: bool = True,
     alarm_filename: str = "alarmes_mapeados_colunas.csv",
     date_col: str = "data",
-    group_gap_hours: float = 6.0,   # NOVO: junta alarmes a menos de X horas de distância
+    group_gap_hours: float = 6.0, 
 ) -> list[pd.Timestamp]:
     """
     Carrega os eventos de alarme de um equipamento a partir do arquivo de
@@ -73,12 +73,10 @@ def load_alarm_events(
     if not timestamps:
         return []
 
-    # ── Agrupamento: junta timestamps consecutivos próximos em um único evento ──
     grouped_events: list[pd.Timestamp] = [timestamps[0]]
     for ts in timestamps[1:]:
         gap = (ts - grouped_events[-1]) / pd.Timedelta(hours=1)
         if gap > group_gap_hours:
             grouped_events.append(ts)
-        # senão, ts fica "absorvido" no evento anterior (não vira um novo evento)
 
     return grouped_events

@@ -9,10 +9,10 @@ from transpetro_modelos.training.evaluate import apply_debounce
 
 def compute_balanced_score_multi_failure(
     scores_df: pd.DataFrame,
-    failure_events: list,               # agora aceita "YYYY-MM" (mês) OU datetime/Timestamp (exato)
+    failure_events: list,  
     prefailure_days: int = 30,
     *,
-    post_failure_buffer_days: int = 1,   # NOVO: só usado quando o evento é exato
+    post_failure_buffer_days: int = 1,
     false_positive_penalty: float = 2.0,
     min_prefailure_rate: float = 0.5,
     debounce_consecutive: int = 1,
@@ -27,14 +27,11 @@ def compute_balanced_score_multi_failure(
     per_failure_metrics: list[dict[str, Any]] = []
 
     for event in failure_events:
-        # ── NOVO: decide o tipo de evento ──
         if isinstance(event, str):
-            # comportamento original: mês inteiro
             event_start = pd.Timestamp(event + "-01")
             event_end = event_start + pd.offsets.MonthBegin(1)
             label = event
         else:
-            # NOVO: timestamp exato (dia + hora)
             event_ts = pd.Timestamp(event)
             event_start = event_ts
             event_end = event_ts + pd.Timedelta(days=post_failure_buffer_days)
@@ -59,7 +56,6 @@ def compute_balanced_score_multi_failure(
             "prefailure_alerts": int(pre_samples["is_anomaly"].sum()),
         })
 
-    # ── a partir daqui, NADA muda em relação à sua versão original ──
     excluded_mask = gray_mask | prefailure_mask
     normal_mask = ~excluded_mask
     normal_samples = scores_df[normal_mask]

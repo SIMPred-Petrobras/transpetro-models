@@ -84,8 +84,8 @@ def remove_failure_windows(
 
 def load_failure_events_by_equipment(
     alarm_file: str,
-    data_start: pd.Timestamp | None = None,   # NOVO
-    data_end: pd.Timestamp | None = None,      # NOVO
+    data_start: pd.Timestamp | None = None, 
+    data_end: pd.Timestamp | None = None,   
     equipment_col: str = "Tag Alarme",
     date_col: str = "data",
 ) -> dict[str, list[pd.Timestamp]]:
@@ -749,8 +749,8 @@ def main(
     print(f"Max FP Rate: {max_fp_rate:.2%}" if max_fp_rate else "Max FP Rate: ∞ (sem constraint)")
     print("=" * 70 + "\n")
 
-    Task.add_requirements("setuptools>=65.0")  # FIX para OpenSSL 3.0
-    Task.add_requirements("gitpython>=3.1.40")  # FIX para clone
+    Task.add_requirements("setuptools>=65.0")
+    Task.add_requirements("gitpython>=3.1.40") 
     Task.add_requirements("pyarrow")
     Task.add_requirements("torch", package_version="")
 
@@ -775,7 +775,6 @@ def main(
     df_raw = load_equipment_data(equipment_id, from_clearml=not local_data)
     print(f"  Shape (RAW):        {df_raw.shape}")
 
-    # ── NOVO: carrega alarmes do mesmo Dataset e filtra pelo período dos dados ──
     try:
         raw_events = load_alarm_events(equipment_id, from_clearml=not local_data)
         filtered_events = [
