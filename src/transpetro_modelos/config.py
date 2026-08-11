@@ -6,17 +6,21 @@ from typing import Optional
 @dataclass
 class EquipmentConfig:
     equipment_id: str
-    failure_date: datetime
-    failure_description: str
     dataset_name: str
     datetime_column: Optional[str]
     exclusion_days_before: int
     preprocessing_steps: list[dict]
+
+    failure_date: datetime | None = None
+    failure_description: str | None = None
+    failure_events: list[str] | None = None
+    failure_descriptions: list[str] | None = None
+
     pre_split_steps: list[dict] = field(default_factory=list)
     preprocess_presets: dict[str, list[dict]] = field(default_factory=dict)
     local_feather: Optional[str] = None
     val_start_date: Optional[datetime] = None
-    val_end_date: Optional[datetime] = None
+    val_end_date: Optional[datetime] = None     
 
 
 COMMUM_PREPROCESSING_STEPS: list[dict] = [
@@ -33,6 +37,12 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
         {"step": "normalize", "method": "robust"},
     ],
 
+    "baseline_raw_no_common": [
+        {"step": "interpolate", "method": "time", "limit": 4},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+
     "baseline_interpolated": [
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
@@ -41,6 +51,13 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
     "moving_average_raw": [
         {"step": "interpolate", "method": "time", "limit": 4},
         *COMMUM_PREPROCESSING_STEPS,
+        {"step": "moving_average", "window": 3, "min_periods": 1},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+
+    "moving_average_raw_no_common": [
+        {"step": "interpolate", "method": "time", "limit": 4},
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
@@ -60,6 +77,13 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
         {"step": "normalize", "method": "robust"},
     ],
 
+    "knn_raw_no_common": [
+        {"step": "interpolate", "method": "time", "limit": 4},
+        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
+        {"step": "clip"},
+        {"step": "normalize", "method": "robust"},
+    ],
+
     "knn_interpolated": [
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "clip"},
@@ -71,6 +95,12 @@ RAW_PRESETS = {
     k: deepcopy(v)
     for k, v in PREPROCESSING_PIPELINES.items()
     if k.endswith("_raw")
+}
+
+RAW_NO_COMMON_PRESETS = {
+    k: deepcopy(v)
+    for k, v in PREPROCESSING_PIPELINES.items()
+    if k.endswith("_no_common")
 }
 
 INTERPOLATED_PRESETS = {
@@ -178,7 +208,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         dataset_name="transpetro-b-8801c_interpolated",
         datetime_column="Timestamp",
         exclusion_days_before=10,
-        local_feather="Dados/B-8801C.csv",
+        local_feather="Dados/B-8801C_interpolated.csv",
         val_start_date=datetime(2024, 5, 1),
         val_end_date=datetime(2024, 6, 25),
         pre_split_steps=[
@@ -187,7 +217,41 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
         preprocess_presets=INTERPOLATED_PRESETS,    
-    )
+    ),
+
+    "B-5501B_interpolated": EquipmentConfig(
+        equipment_id="B-5501B_interpolated",
+        failure_events=["2022-10", "2023-10", "2024-01"],
+        failure_descriptions=["Sobreaquecimento do mancal LA do motor", "Desgaste mancal LA da bomba", "Desgaste mancal LNA da bomba"],
+        dataset_name="transpetro-b-5501b_interpolated",
+        datetime_column="Timestamp",
+        exclusion_days_before=10,
+        local_feather="Dados/B-5501B_interpolated.csv",
+        val_start_date=datetime(2022, 3, 1),
+        val_end_date=datetime(2022, 4, 1),
+        pre_split_steps=[
+            {"step": "filter_running", "column": "Corrente", "threshold": 1},
+            {"step": "remove_transients", "minutes": 10},
+        ],
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
+        preprocess_presets=INTERPOLATED_PRESETS,
+    ),
+
+    "cabiunas_2025_2026": EquipmentConfig(
+        equipment_id="cabiunas_2025_2026",
+        dataset_name="Cabiunas brutos 2025-2026 alarmes mapeados",
+        datetime_column="data_datetime",
+        val_start_date=datetime(2025, 1, 1),
+        val_end_date=datetime(2025, 1, 10),
+        exclusion_days_before=10,
+        pre_split_steps=[
+            {"step": "filter_running", "column": "RUNNING_A", "threshold": 1},
+            {"step": "remove_transients", "minutes": 10},
+            {"step": "select_features", "features": ['data_datetime', '954005_624_TI_0325', '954005_624_PI_0315', '954005_624_PI_0319', '954005_624_PI_0340', '954005_624_PI_0339', '954005_624_PDI_0317', 'TC382_03_A', 'T5_AVG_A', 'TC382_02_A', '954005_624_PDI_0302', 'TC382_05_A', '954005_624_TI_0315', '954005_624_TI_0317', 'TC382_06_A', 'TC382_01_A', 'TC382_04_A', '954005_624_PDIT_0305', '954005_624_TI_0305', '954005_624_TI_0307', '954005_624_TI_0303', 'TV_355Y_A', 'TV_353X_A', 'TV_352X_A', '954005_624_PI_0307', '954005_624_PI_0308', 'TV_353Y_A', 'TV_355X_A', 'TV_351Y_A', 'TV_354Y_A', 'PI_5134001', 'TV_351X_A', '954005_624_TI_0301', '954005_624_PDI_0338', '954005_624_PDI_0301', 'TV_354X_A', 'TV_352Y_A', 'RUNNING_A']}
+        ],
+        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_raw_no_common"]),
+        preprocess_presets=RAW_NO_COMMON_PRESETS,
+    ),
 }
 
 

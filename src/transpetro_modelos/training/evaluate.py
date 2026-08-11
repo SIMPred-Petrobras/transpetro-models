@@ -271,10 +271,7 @@ def compute_balanced_score(
         balanced_score -= penalty
 
     # Normalizar para [0, 1]
-    composite_score = max(
-        0.0,
-        min(1.0, (balanced_score + false_positive_penalty) / (1.0 + false_positive_penalty))
-    )
+    composite_score = max(0.0, min(1.0, (balanced_score + false_positive_penalty) / (1.0 + false_positive_penalty)))
 
     return {
         "composite_score": composite_score,

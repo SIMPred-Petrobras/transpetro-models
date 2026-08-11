@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from clearml import Task
 from transpetro_modelos.config import EQUIPMENT_CONFIGS, get_preprocessing_steps
-from transpetro_modelos.data.loading import load_equipment_data
+from transpetro_modelos.data.loading import (load_equipment_data, load_alarm_events)
 from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
@@ -59,11 +59,51 @@ from transpetro_modelos.training.train import (
     train_autoencoder,
 )
 
+from transpetro_modelos.training.evaluate_multi_failure import compute_balanced_score_multi_failure
 
 ModelType = Literal["dense", "lstm", "ocsvm", "iforest"]
 PresetName = str
 ModeType = Literal["quick", "full", "extensive"]
 
+def remove_failure_windows(
+    df: pd.DataFrame,
+    failure_events: list[str],
+    prefailure_days: int,
+) -> pd.DataFrame:
+    """
+    Remove do DataFrame os pontos dentro da zona cinzenta (mês da falha)
+    e da janela de pré-falha de cada evento, para uso no split de treino.
+    """
+    mask_exclude = pd.Series(False, index=df.index)
+    for event in failure_events:
+        month_start = pd.Timestamp(event + "-01")
+        month_end = month_start + pd.offsets.MonthBegin(1)
+        window_start = month_start - pd.Timedelta(days=prefailure_days)
+        mask_exclude |= (df.index >= window_start) & (df.index < month_end)
+    return df[~mask_exclude]
+
+def load_failure_events_by_equipment(
+    alarm_file: str,
+    data_start: pd.Timestamp | None = None,   # NOVO
+    data_end: pd.Timestamp | None = None,      # NOVO
+    equipment_col: str = "Tag Alarme",
+    date_col: str = "data",
+) -> dict[str, list[pd.Timestamp]]:
+    if alarm_file.endswith(".csv"):
+        df = pd.read_csv(alarm_file)
+    else:
+        df = pd.read_excel(alarm_file)
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    if data_start is not None:
+        df = df[df[date_col] >= data_start]
+    if data_end is not None:
+        df = df[df[date_col] <= data_end]
+
+    return {
+        equip_id: sorted(group[date_col].tolist())
+        for equip_id, group in df.groupby(equipment_col)
+    }
 
 # ════════════════════════════════════════════════════════════════
 # TrialConfig
@@ -489,18 +529,29 @@ def run_trial(
     config = EQUIPMENT_CONFIGS[equipment_id]
     min_rows = max(50, trial.seq_len + 1 if trial.model == "lstm" else 50)
 
-    splits = temporal_split(
-        df_pre,
-        val_start_date=trial.val_start,
-        val_end_date=getattr(config, "val_end_date", None),
-    )
+    splits = temporal_split(df_pre, val_start_date=trial.val_start, val_end_date=getattr(config, "val_end_date", None))
 
     if len(splits["train"]) < min_rows or len(splits["val"]) < min_rows:
         return None
 
+    # ── Remoção de janelas do treino: só para equipamentos com falha
+    # conhecida por MÊS (incerteza de dia). Para eventos com data exata
+    # (seja único, via failure_date, ou múltiplos, via failure_events com
+    # Timestamps), o treino permanece intacto — igual ao comportamento
+    # original do pipeline.
+    failure_events = getattr(config, "failure_events", None)
+    train_split = splits["train"]
+
+    is_month_based = bool(failure_events) and all(isinstance(e, str) for e in failure_events)
+
+    if is_month_based:
+        train_split = remove_failure_windows(train_split, failure_events, prefailure_days)
+        if len(train_split) < min_rows:
+            return None
+
     steps = get_preprocessing_steps(equipment_id, preset=trial.preset)
     train_df, artifacts, _ = run_preprocessing(
-        splits["train"], steps, return_artifacts=True, return_report=True
+        train_split, steps, return_artifacts=True, return_report=True
     )
     val_df, _, _ = run_preprocessing(
         splits["val"], steps, fitted_artifacts=artifacts,
@@ -545,7 +596,20 @@ def run_trial(
     # MÉTRICAS balanceadas com penalização de FP
     failure_date = getattr(config, "failure_date", None)
 
-    if failure_date is not None:
+    if failure_events:
+        # Cobre tanto mês (list[str]) quanto timestamps exatos (list[datetime]),
+        # a própria função decide item a item.
+        metrics = compute_balanced_score_multi_failure(
+            scores_df,
+            failure_events=failure_events,
+            prefailure_days=prefailure_days,
+            false_positive_penalty=2.0,
+            min_prefailure_rate=0.3,
+            debounce_consecutive=trial.debounce_consecutive,
+            aggregation="mean" if not is_month_based else "min",  # ver nota abaixo
+        )
+        composite_score = float(metrics["composite_score"])
+    elif failure_date is not None:
         metrics = compute_balanced_score(
             scores_df,
             failure_date=failure_date,
@@ -671,7 +735,7 @@ def main(
     prefailure_days: int = 30,
     normal_end_days: int = 60,
     max_fp_rate: float | None = None,
-    clearml_project=None,
+    clearml_project=None,        
 ) -> None:
     """Pipeline principal do AutoML."""
     start_time = time.time()
@@ -710,6 +774,25 @@ def main(
     print("Carregando dados...")
     df_raw = load_equipment_data(equipment_id, from_clearml=not local_data)
     print(f"  Shape (RAW):        {df_raw.shape}")
+
+    # ── NOVO: carrega alarmes do mesmo Dataset e filtra pelo período dos dados ──
+    try:
+        raw_events = load_alarm_events(equipment_id, from_clearml=not local_data)
+        filtered_events = [
+            e for e in raw_events
+            if df_raw.index.min() <= e <= df_raw.index.max()
+        ]
+        if filtered_events:
+            import dataclasses
+            config = dataclasses.replace(config, failure_events=filtered_events)
+            EQUIPMENT_CONFIGS[equipment_id] = config
+            print(f"  Eventos de alarme: {len(filtered_events)} de {len(raw_events)} "
+                  f"dentro do período dos dados ({df_raw.index.min()} → {df_raw.index.max()})")
+        else:
+            print(f"  AVISO: nenhum alarme cai dentro do período dos dados.")
+    except FileNotFoundError:
+        print("  AVISO: arquivo de alarmes não encontrado nesse Dataset.")
+
     df_pre, _, _ = run_preprocessing(df_raw, config.pre_split_steps)
     print(f"  Shape: {df_pre.shape}\n")
 
