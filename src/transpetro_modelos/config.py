@@ -255,6 +255,51 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             ],
         },
     ),
+    "B-8802B-2025": EquipmentConfig(
+        equipment_id="B-8802B-2025",
+        # RETREINO PÓS-DRIFT (ago/2026): o modelo de 2022 dá 12% de alarme em 2025-26
+        # (reparo pós-falha + faixa de regimes mais ampla que as 6 semanas do treino original).
+        # NÃO há falha conhecida neste período: failure_date abaixo é SENTINELA (fim dos dados
+        # 2026-08-10 + 1 dia) só para satisfazer o split; a janela pré-falha resultante mede FP
+        # em dado recente, não detecção. Seleção deve usar --select-by heldout (FP em 2026
+        # nunca visto). Sensibilidade é validada à parte, pontuando a falha de 2022 com o
+        # modelo novo. Dados: b8802b-2025-2026/ (COV IFIX) -> grade 1 min hold-last-value.
+        failure_date=datetime(2026, 8, 11),
+        failure_description="sem falha no período (retreino pós-drift; reparo após a falha de 2022)",
+        dataset_name="transpetro-b-8802b-2025",
+        datetime_column=None,
+        exclusion_days_before=1,
+        prefailure_days=7,
+        normal_end_days=20,
+        # treino = 2025 inteiro (cobre os regimes); held-out = jan-jun/2026
+        val_start_date=datetime(2026, 1, 1),
+        val_end_date=datetime(2026, 6, 1),
+        local_feather="Dados-novos/B-8802B-2025.feather",
+        pre_split_steps=[
+            {"step": "remove_sensor_errors", "error_values": [0.0]},
+            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 35.0},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+            {"step": "remove_transients", "minutes": 90, "gap_minutes": 30},
+            {"step": "select_features", "features": ["Pressão Sucção", "Pressão Descarga", "Vibração Bomba LA", "Vibração Bomba LNA", "Temperatura Bomba LA"]},
+        ],
+        preprocessing_steps=[
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
+        ],
+        preprocess_presets={
+            "baseline": [
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "rolling_ma": [
+                {"step": "moving_average", "window": 3, "min_periods": 1},
+                {"step": "add_rolling_features", "windows": [12, 72]},
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+        },
+    ),
     "B-8802B-8s": EquipmentConfig(
         equipment_id="B-8802B-8s",
         failure_date=datetime(2022, 7, 6, 10, 0),
