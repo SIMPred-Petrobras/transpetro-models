@@ -110,3 +110,5 @@ a pasta `B-8802B/` (modelo de 2022) foi mantida **intacta para comparação**. E
   como já se faz após partidas (`remove_transients`). Já implementado no `simpred_inference.py`;
 - limiar **μ + 6,5·σ** do erro em operação normal (2025) e persistência **15 de 20** leituras
   (`debounce_min`/`debounce_window` no `alarm.json`).
+
+Guia de migração passo a passo (o que muda, como validar, rollback): **`B-8802B-2025/MIGRACAO.md`**.
