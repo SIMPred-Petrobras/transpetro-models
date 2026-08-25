@@ -52,7 +52,7 @@ de sucção.
 **Justificativa:** alarme em virtude de **vibração elevada simultaneamente nos dois mancais da bomba**, ambos acima
 do p99 da operação normal, por mais de 1 hora, com descarga acima do usual. Essa é a assinatura mais próxima de um
 problema mecânico entre os quatro episódios. **Pode indicar** desbalanceamento, desalinhamento, folga ou operação fora
-do ponto (cavitação/recirculação). **Pergunta à operação:** o que ocorreu na noite de 17/01/2026? Houve manobra,
+do ponto (cavitação/recirculação). Detalhe relevante na figura: a vibração subiu gradualmente ao longo de ~3 h (18h → 21h) e **voltou ao normal às ~23:30, no mesmo instante em que a pressão de descarga caiu de 52,9 para 46,8 bar** — ou seja, o desvio acompanhou um ponto de operação de alta pressão. Se esse regime se repetir, a vibração tende a voltar. **Pergunta à operação:** o que ocorreu na noite de 17/01/2026? Houve manobra,
 partida de bomba em paralelo ou ruído/vibração percebidos? **Prioridade de verificação: alta.**
 
 ---
