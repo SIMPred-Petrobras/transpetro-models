@@ -98,3 +98,15 @@ Os passos foram separados por natureza:
 Ambos os equipamentos prontos usam **VAE** (por isso `.pt`). Se um dia empacotarmos um
 modelo sklearn (OCSVM/IsolationForest/LOF), o arquivo do modelo já é um `.pkl` puro que
 abre sem lib — nesse caso o passo 3 vira só `pickle.load`.
+
+## B-8802B-2025 — modelo atualizado (retreino pós-drift), lado a lado com o B-8802B
+
+A pasta `B-8802B-2025/` é o **modelo atualizado** do B-8802B (treinado em 2025, validado em 2026);
+a pasta `B-8802B/` (modelo de 2022) foi mantida **intacta para comparação**. Em produção use o
+`B-8802B-2025`. Diferenças de pipeline (tudo declarado no `pipeline.json`, nada no código):
+
+- novo passo **`remove_regime_transients`**: após um degrau brusco de pressão (manobra de processo —
+  |Δ| > 2,4 bar na sucção ou > 4,8 bar na descarga em 15 min) os 90 min seguintes são descartados,
+  como já se faz após partidas (`remove_transients`). Já implementado no `simpred_inference.py`;
+- limiar **μ + 6,5·σ** do erro em operação normal (2025) e persistência **15 de 20** leituras
+  (`debounce_min`/`debounce_window` no `alarm.json`).

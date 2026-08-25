@@ -146,6 +146,22 @@ def remove_transients(df, minutes=10, gap_minutes=5):
         mask[(df.index >= t) & (df.index < t + pd.Timedelta(minutes=minutes))] = False
     return df[mask].copy()
 
+def remove_regime_transients(df, columns, deltas, minutes=90, window=3):
+    """Remove os `minutes` após um degrau brusco de processo (|Δ| > delta em `window` linhas)."""
+    if len(df) == 0:
+        return df
+    step = pd.Series(False, index=df.index)
+    for col, delta in zip(columns, deltas):
+        if col in df.columns:
+            step |= df[col].diff(window).abs() > delta
+    if not step.any():
+        return df
+    last_step = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    last_step[step] = df.index[step]
+    since = df.index - last_step.ffill()
+    in_mask = (since >= pd.Timedelta(0)) & (since < pd.Timedelta(minutes=minutes))
+    return df[~in_mask.fillna(False).values].copy()
+
 def resample(df, freq="5min", agg="last"):
     """Reamostra a série COV para uma grade regular (último valor da janela)."""
     r = df.resample(freq)
@@ -201,6 +217,7 @@ _STEPS_TEMPORAIS = {
     "remove_sensor_errors": remove_sensor_errors,
     "filter_running": filter_running,
     "remove_transients": remove_transients,
+    "remove_regime_transients": remove_regime_transients,
     "resample": resample,
     "ffill": ffill,
     "moving_average": moving_average,

@@ -63,6 +63,9 @@ REGISTRY = {
                       "docs": []},
     "B-3403C":       {"config": "B-3403C_interpolated", "arch": "DENSE", "type": "Bomba",
                       "docs": []},
+    # retreino pós-drift (dados 2025-26); pasta separada p/ comparar com o bundle B-8802B (2022)
+    "B-8802B-2025":  {"config": "B-8802B-2025", "arch": "VAE",   "type": "Bomba",
+                      "docs": ["auditoria_pdm.md"]},
 }
 
 

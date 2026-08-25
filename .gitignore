@@ -31,3 +31,7 @@ deploy_v2/Transpetro/*/dados/
 deploy_v2/Transpetro/*/scripts/*_inferencia.csv
 # exceção à regra global "*.pt": os pesos do bundle de deploy DEVEM ser versionados
 !deploy_v2/Transpetro/*/modelos/*/model_state.pt
+
+# dados brutos IFIX do B-8802B 2025-26 (273 MB) e recortes soltos
+b8802b-2025-2026/
+intervalo_com_anomalia.csv

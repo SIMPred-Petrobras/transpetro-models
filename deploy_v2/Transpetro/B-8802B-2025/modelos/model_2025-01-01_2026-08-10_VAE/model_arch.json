@@ -1,0 +1,10 @@
+{
+  "model_type": "vae",
+  "input_dim": 5,
+  "encoding_layers": [
+    128,
+    64,
+    32
+  ],
+  "latent_dim": 16
+}

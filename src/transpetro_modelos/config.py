@@ -281,6 +281,12 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             {"step": "resample", "freq": "5min"},
             {"step": "ffill", "limit": 4},
             {"step": "remove_transients", "minutes": 90, "gap_minutes": 30},
+            # Máscara de transiente de PROCESSO (manobra): degrau >1,5×p99 da variação normal em
+            # 15 min (sucção 2,4 bar / descarga 4,8 bar) -> ignora os 90 min seguintes. Corta os
+            # blips de FP dirigidos por pressão sem alterar a sensibilidade (validado: falha 2022 e
+            # falha sintética inalteradas; FP held-out 0,063% -> 0,038%).
+            {"step": "remove_regime_transients", "columns": ["Pressão Sucção", "Pressão Descarga"],
+             "deltas": [2.4, 4.8], "minutes": 90, "window": 3},
             {"step": "select_features", "features": ["Pressão Sucção", "Pressão Descarga", "Vibração Bomba LA", "Vibração Bomba LNA", "Temperatura Bomba LA"]},
         ],
         preprocessing_steps=[

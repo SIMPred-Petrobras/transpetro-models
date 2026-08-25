@@ -67,6 +67,38 @@ def remove_transients(df: pd.DataFrame, minutes: int = 10, gap_minutes: int = 5)
 
     return df[mask].copy()
 
+
+def remove_regime_transients(
+    df: pd.DataFrame,
+    columns: list[str],
+    deltas: list[float],
+    minutes: int = 90,
+    window: int = 3,
+) -> pd.DataFrame:
+    """
+    Remove os `minutes` seguintes a um DEGRAU brusco de processo (ex.: manobra de pressão).
+
+    Um degrau é |x_t - x_{t-window}| > delta em qualquer coluna listada (`window` em linhas da
+    grade já reamostrada; ex.: 3 linhas de 5 min = 15 min). Mesma ideia do remove_transients
+    (que trata partidas), mas disparada por mudança de regime operacional — evita que o
+    autoencoder acuse manobras de processo como anomalia do equipamento. Colunas ausentes são
+    ignoradas. Use APÓS resample/ffill e ANTES de select_features.
+    """
+    if len(df) == 0:
+        return df
+    step = pd.Series(False, index=df.index)
+    for col, delta in zip(columns, deltas):
+        if col in df.columns:
+            step |= df[col].diff(window).abs() > delta
+    if not step.any():
+        return df
+    last_step = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    last_step[step] = df.index[step]
+    last_step = last_step.ffill()
+    since = (df.index - last_step)
+    in_mask = (since >= pd.Timedelta(0)) & (since < pd.Timedelta(minutes=minutes))
+    return df[~in_mask.fillna(False).values].copy()
+
 def clip(
     df: pd.DataFrame,
     bounds=None,
@@ -344,6 +376,8 @@ def run_preprocessing(
             df = filter_threshold(df, **params)
         elif step == "remove_transients":
             df = remove_transients(df, **params)
+        elif step == "remove_regime_transients":
+            df = remove_regime_transients(df, **params)
         elif step == "normalize":
             df, artifacts.scaler = normalize(df, scaler=artifacts.scaler, **params)
         elif step == "clip":
