@@ -331,7 +331,8 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
     #                térmico não linear (motor/ambiente) que o resíduo linear não captura.
     #   detrend14d : 5 sensores, temps e vibrações menos baseline causal de 14 dias de operação
     #                (remove sazonalidade/patamar; falha 2022 = rampa de ~2 dias, preservada).
-    #   all8_detrend14d: os dois combinados.
+    #   detrend7d  : idem com janela de 7 dias (absorve patamar novo em ~3-4 d; mede o botão da janela).
+#   all8_detrend14d: all8 + detrend14d combinados.
     # Mesmo dataset/janelas do B-8802B-2025; select_features saiu do pre_split para cada preset
     # escolher suas colunas. Seleção SÓ por --select-by heldout; validar sensibilidade (falha 2022
     # + sintética) com as MESMAS features antes de qualquer decisão. Se algum preset com detrend
@@ -378,6 +379,14 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
                 {"step": "select_features", "features": _B8802B_5_FEATURES},
                 {"step": "remove_slow_trend", "columns": _B8802B_THERMAL_VIB_5,
                  "window": 4032, "min_periods": 576, "stat": "median"},
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+            # janela curta: absorve um novo patamar em ~3-4 dias (mede o "botão" da janela)
+            "detrend7d": [
+                {"step": "select_features", "features": _B8802B_5_FEATURES},
+                {"step": "remove_slow_trend", "columns": _B8802B_THERMAL_VIB_5,
+                 "window": 2016, "min_periods": 288, "stat": "median"},
                 {"step": "clip", "upper_pct": 99.9},
                 {"step": "normalize", "method": "robust"},
             ],
