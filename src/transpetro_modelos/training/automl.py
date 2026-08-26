@@ -380,7 +380,7 @@ def build_trials(
         _debounces     = debounce_consecutives or [1, 2, 4, 6, 12]
         _epochs, _patience = epochs * 2, patience * 2
 
-    if mode == "balanced":
+    elif mode == "balanced":
         _presets       = presets       or available_presets[:2]
         _models        = models        or ["dense", "lstm", "ocsvm", "vae", "isolation_forest", "lof"]
         _thresholds    = thresholds    or [95.0, 97.5, 99.0]

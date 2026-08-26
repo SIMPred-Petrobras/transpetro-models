@@ -33,6 +33,20 @@ _THERMAL_VIB_FEATURES = [
     "Temperatura Motor LNA",
 ]
 
+# B-8802B: 5 sensores do bundle em produção e os 8 disponíveis (experimento B-8802B-2025-fe).
+_B8802B_5_FEATURES = [
+    "Pressão Sucção", "Pressão Descarga",
+    "Vibração Bomba LA", "Vibração Bomba LNA", "Temperatura Bomba LA",
+]
+_B8802B_8_FEATURES = _B8802B_5_FEATURES + [
+    "Temperatura Bomba LNA", "Temperatura Motor LA", "Temperatura Motor LNA",
+]
+# colunas a "destendenciar" (pressões ficam brutas: definem o regime)
+_B8802B_THERMAL_VIB_5 = ["Vibração Bomba LA", "Vibração Bomba LNA", "Temperatura Bomba LA"]
+_B8802B_THERMAL_VIB_8 = _B8802B_THERMAL_VIB_5 + [
+    "Temperatura Bomba LNA", "Temperatura Motor LA", "Temperatura Motor LNA",
+]
+
 B4064A_NOVOS_PREPROCESS_PRESETS: dict[str, list[dict]] = {
     "baseline": [
         {"step": "clip"},
@@ -301,6 +315,76 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
             "rolling_ma": [
                 {"step": "moving_average", "window": 3, "min_periods": 1},
                 {"step": "add_rolling_features", "windows": [12, 72]},
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+        },
+    ),
+    # ── Experimento de ENGENHARIA DE FEATURES (ago/2026) sobre o B-8802B-2025 ──────────────
+    # Objetivo: reduzir os FP restantes do bundle B-8802B-2025 (4 episódios em jun-ago/26) que
+    # coincidem com efeitos LENTOS/de regime: Temp Bomba LA cai de ~55°C (2025) p/ ~45°C (2026),
+    # eps. 1-2 no regime de descarga alto (22% do treino). Medido antes de desenhar os presets:
+    #   - resíduo linear Temp~P.Descarga tira só 3% do σ (vibração 0%) → descartado;
+    #   - ΔT LA−LNA varia entre meses tanto quanto a temp bruta (σ mensal 3,2 vs 3,2°C) → descartado.
+    # Presets (todos comparados contra "baseline" = receita exata do bundle em produção):
+    #   all8       : + Temp Bomba LNA e Temps Motor como entrada — o VAE aprende o condicionamento
+    #                térmico não linear (motor/ambiente) que o resíduo linear não captura.
+    #   detrend14d : 5 sensores, temps e vibrações menos baseline causal de 14 dias de operação
+    #                (remove sazonalidade/patamar; falha 2022 = rampa de ~2 dias, preservada).
+    #   all8_detrend14d: os dois combinados.
+    # Mesmo dataset/janelas do B-8802B-2025; select_features saiu do pre_split para cada preset
+    # escolher suas colunas. Seleção SÓ por --select-by heldout; validar sensibilidade (falha 2022
+    # + sintética) com as MESMAS features antes de qualquer decisão. Se algum preset com detrend
+    # vencer, o deploy passa a precisar de 14 dias de histórico na entrada (estado) — avaliar.
+    "B-8802B-2025-fe": EquipmentConfig(
+        equipment_id="B-8802B-2025-fe",
+        failure_date=datetime(2026, 8, 11),
+        failure_description="sem falha no período (experimento de feature engineering sobre o retreino 2025)",
+        dataset_name="transpetro-b-8802b-2025",
+        dataset_file_stem="B-8802B-2025",
+        datetime_column=None,
+        exclusion_days_before=1,
+        prefailure_days=7,
+        normal_end_days=20,
+        val_start_date=datetime(2026, 1, 1),
+        val_end_date=datetime(2026, 6, 1),
+        local_feather="Dados-novos/B-8802B-2025.feather",
+        pre_split_steps=[
+            {"step": "remove_sensor_errors", "error_values": [0.0]},
+            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 35.0},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+            {"step": "remove_transients", "minutes": 90, "gap_minutes": 30},
+            {"step": "remove_regime_transients", "columns": ["Pressão Sucção", "Pressão Descarga"],
+             "deltas": [2.4, 4.8], "minutes": 90, "window": 3},
+        ],
+        preprocessing_steps=[
+            {"step": "select_features", "features": _B8802B_5_FEATURES},
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
+        ],
+        preprocess_presets={
+            "baseline": [
+                {"step": "select_features", "features": _B8802B_5_FEATURES},
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "all8": [
+                {"step": "select_features", "features": _B8802B_8_FEATURES},
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "detrend14d": [
+                {"step": "select_features", "features": _B8802B_5_FEATURES},
+                {"step": "remove_slow_trend", "columns": _B8802B_THERMAL_VIB_5,
+                 "window": 4032, "min_periods": 576, "stat": "median"},
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "all8_detrend14d": [
+                {"step": "select_features", "features": _B8802B_8_FEATURES},
+                {"step": "remove_slow_trend", "columns": _B8802B_THERMAL_VIB_8,
+                 "window": 4032, "min_periods": 576, "stat": "median"},
                 {"step": "clip", "upper_pct": 99.9},
                 {"step": "normalize", "method": "robust"},
             ],

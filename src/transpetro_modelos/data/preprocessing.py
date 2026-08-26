@@ -224,6 +224,40 @@ def moving_average(
     return df
 
 
+def remove_slow_trend(
+    df: pd.DataFrame,
+    columns: list[str],
+    window: int = 4032,
+    min_periods: int = 576,
+    stat: str = "median",
+) -> pd.DataFrame:
+    """
+    Remove a TENDÊNCIA LENTA de cada coluna subtraindo um baseline causal (rolling
+    median/mean de `window` períodos, sem look-ahead): x_detrended = x - baseline(x).
+
+    Objetivo: tornar o modelo invariante a variações mais lentas que a janela — sazonalidade
+    térmica (ambiente), deriva de sensor, mudança de patamar pós-reparo — preservando o que
+    é mais rápido que ela (rampa de falha de horas/dias, degrau térmico sustentado).
+
+    Trade-off deliberado: degradações MAIS LENTAS que a janela são absorvidas pelo baseline
+    e deixam de ser detectáveis. Com dado de 5 min, window=4032 = 14 dias de operação
+    (conta períodos, não tempo: paradas removidas antes não entram) e min_periods=576 = 2 dias.
+
+    Colunas fora de `columns` (ex.: pressões, que definem o regime) ficam intactas. Linhas
+    iniciais sem baseline (< min_periods) são removidas via dropna(). Aplicar ANTES de
+    clip/normalize e DEPOIS de select_features.
+    """
+    if stat not in {"median", "mean"}:
+        raise ValueError(f"stat must be 'median' or 'mean', got '{stat}'")
+    df = df.copy()
+    cols = [c for c in columns if c in df.columns]
+    for col in cols:
+        roll = df[col].rolling(window, min_periods=min_periods, center=False)
+        baseline = roll.median() if stat == "median" else roll.mean()
+        df[col] = df[col] - baseline
+    return df.dropna()
+
+
 def knn_impute(
     df: pd.DataFrame,
     imputer: KNNImputer | None = None,
@@ -398,6 +432,8 @@ def run_preprocessing(
             df, artifacts.knn_imputer = knn_impute(df, imputer=artifacts.knn_imputer, **params)
         elif step == "add_rolling_features":
             df = add_rolling_features(df, **params)
+        elif step == "remove_slow_trend":
+            df = remove_slow_trend(df, **params)
         elif step == "add_load_residual":
             df, artifacts.load_residual_coefs = add_load_residual(
                 df, coefs=artifacts.load_residual_coefs, **params
