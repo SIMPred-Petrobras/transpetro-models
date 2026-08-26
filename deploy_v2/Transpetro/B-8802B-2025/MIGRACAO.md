@@ -1,19 +1,38 @@
 # B-8802B → B-8802B-2025: o que muda para a integração
 
-**Resumo em uma linha:** troque a pasta do bundle (`B-8802B/` → `B-8802B-2025/`) e atualize o
+**Resumo em uma linha:** é o mesmo modelo, atualizado com os dados de 2025–26 — troque a pasta do bundle (`B-8802B/` → `B-8802B-2025/`) e atualize o
 `simpred_inference.py` compartilhado. **O contrato de entrada/saída não muda.** Nada de novo para
 instalar.
 
 ---
 
-## 1. Por que existe um modelo novo
+## 1. É o mesmo modelo — atualizado com os dados novos
 
-O modelo de 2022 (`B-8802B/`) foi treinado em ~6 semanas de operação e, após o reparo do equipamento e a
-ampliação da faixa de regimes, passou a acusar **~12% do tempo de operação normal** em 2025–26 (*concept
-drift*, não degradação). O `B-8802B-2025/` foi retreinado com **12 meses de operação normal (2025)** e
-validado em **5 meses nunca vistos (jan–mai/2026)**: **0,04% de alarme**, mantendo a detecção da falha real
-de 2022 (~2 dias de antecedência).
+O `B-8802B-2025` **não é uma abordagem diferente**: é o **mesmo modelo do B-8802B, na versão 2**. Continua sendo:
 
+- o **mesmo tipo de modelo** (autoencoder variacional — VAE — que aprende a operação normal e mede o erro de reconstrução);
+- os **mesmos 5 sensores** de entrada (Pressão Sucção, Pressão Descarga, Vibração Bomba LA/LNA, Temperatura Bomba LA);
+- a **mesma lógica de alarme** (erro de reconstrução → limiar → confirmação por persistência → `normal / atencao / alarme`);
+- o **mesmo contrato de integração** (4 passos, mesmos arquivos, mesma saída).
+
+O que foi feito foi **treinar de novo com os dados recentes e afinar a calibração**:
+
+| O que melhorou | Antes (B-8802B, 2022) | Agora (B-8802B-2025) |
+|---|---|---|
+| Dados de treino | ~6 semanas de 2022 (uma única campanha) | **12 meses de 2025** (todos os regimes de operação do ano) |
+| Validação | in-sample | **5 meses nunca vistos (jan–mai/2026)** + falha real de 2022 + falha sintética |
+| Hiperparâmetros | AutoML de 2022 | **re-otimizados por AutoML** sobre os dados novos (camadas 128-64-32, latente 16) |
+| Limiar | quantil por meta de FP | **média + 6,5·σ do erro em operação normal** (régua interpretável) |
+| Confirmação | 6 leituras seguidas | **15 de 20 leituras** (mais robusta a ruído isolado) |
+| Pré-processamento | 8 passos | **+1 passo**: máscara de 90 min após manobra de pressão |
+
+**Por que foi necessário.** Após o reparo do equipamento (pós-falha de 2022) e com a operação em uma faixa maior de
+regimes, o modelo de 2022 passou a ver o novo "normal" como anomalia (~12% de alarme em 2025–26 — *concept drift*).
+Recalibrar só o limiar não resolveria: para zerar o falso positivo no novo normal, o limiar ficaria acima do nível da
+própria falha de 2022, e o modelo deixaria de detectá-la. Retreinar com o normal atual restaurou a margem: **~0% de
+alarme em 2026 e a falha de 2022 continua detectada com ~2 dias de antecedência**.
+
+Em resumo, para a integração: **é o B-8802B de sempre, com pesos e calibração novos** — por isso a troca é só de pasta.
 As duas pastas coexistem de propósito (histórico/comparação). **Em produção, use só o `B-8802B-2025`.**
 
 ## 2. O que muda (tabela)
