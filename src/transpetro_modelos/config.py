@@ -20,8 +20,8 @@ class EquipmentConfig:
     preprocess_presets: dict[str, list[dict]] = field(default_factory=dict)
     local_feather: Optional[str] = None
     val_start_date: Optional[datetime] = None
-    val_end_date: Optional[datetime] = None     
-
+    val_end_date: Optional[datetime] = None 
+    raw_data_filename: str | None = None    
 
 COMMUM_PREPROCESSING_STEPS: list[dict] = [
     {"step": "filter_running", "column": "B-4064A: Corrente", "threshold": 1.0},
@@ -33,12 +33,6 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
     "baseline_raw": [
         {"step": "interpolate", "method": "time", "limit": 4},
         *COMMUM_PREPROCESSING_STEPS,
-        {"step": "clip"},
-        {"step": "normalize", "method": "robust"},
-    ],
-
-    "baseline_raw_no_common": [
-        {"step": "interpolate", "method": "time", "limit": 4},
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
     ],
@@ -56,13 +50,6 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
         {"step": "normalize", "method": "robust"},
     ],
 
-    "moving_average_raw_no_common": [
-        {"step": "interpolate", "method": "time", "limit": 4},
-        {"step": "moving_average", "window": 3, "min_periods": 1},
-        {"step": "clip"},
-        {"step": "normalize", "method": "robust"},
-    ],
-
     "moving_average_interpolated": [
         {"step": "moving_average", "window": 3, "min_periods": 1},
         {"step": "clip"},
@@ -72,13 +59,6 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
     "knn_raw": [
         {"step": "interpolate", "method": "time", "limit": 4},
         *COMMUM_PREPROCESSING_STEPS,
-        {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
-        {"step": "clip"},
-        {"step": "normalize", "method": "robust"},
-    ],
-
-    "knn_raw_no_common": [
-        {"step": "interpolate", "method": "time", "limit": 4},
         {"step": "knn_impute", "n_neighbors": 3, "weights": "distance"},
         {"step": "clip"},
         {"step": "normalize", "method": "robust"},
@@ -235,22 +215,6 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
         preprocess_presets=INTERPOLATED_PRESETS,
-    ),
-
-    "cabiunas_2025_2026": EquipmentConfig(
-        equipment_id="cabiunas_2025_2026",
-        dataset_name="Cabiunas brutos 2025-2026 alarmes mapeados",
-        datetime_column="data_datetime",
-        val_start_date=datetime(2025, 1, 1),
-        val_end_date=datetime(2025, 1, 10),
-        exclusion_days_before=10,
-        pre_split_steps=[
-            {"step": "filter_running", "column": "RUNNING_A", "threshold": 1},
-            {"step": "remove_transients", "minutes": 10},
-            {"step": "select_features", "features": ['data_datetime', '954005_624_TI_0325', '954005_624_PI_0315', '954005_624_PI_0319', '954005_624_PI_0340', '954005_624_PI_0339', '954005_624_PDI_0317', 'TC382_03_A', 'T5_AVG_A', 'TC382_02_A', '954005_624_PDI_0302', 'TC382_05_A', '954005_624_TI_0315', '954005_624_TI_0317', 'TC382_06_A', 'TC382_01_A', 'TC382_04_A', '954005_624_PDIT_0305', '954005_624_TI_0305', '954005_624_TI_0307', '954005_624_TI_0303', 'TV_355Y_A', 'TV_353X_A', 'TV_352X_A', '954005_624_PI_0307', '954005_624_PI_0308', 'TV_353Y_A', 'TV_355X_A', 'TV_351Y_A', 'TV_354Y_A', 'PI_5134001', 'TV_351X_A', '954005_624_TI_0301', '954005_624_PDI_0338', '954005_624_PDI_0301', 'TV_354X_A', 'TV_352Y_A', 'RUNNING_A']}
-        ],
-        preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_raw_no_common"]),
-        preprocess_presets=RAW_NO_COMMON_PRESETS,
     ),
 }
 
