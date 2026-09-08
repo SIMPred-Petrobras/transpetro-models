@@ -13,6 +13,9 @@ Uso extensivo (1-2 dias):
     
 Uso com constraint de FP (máx 1%):
     python scripts/automl_anomaly_v3.py --equipment MEQ-01 --mode extensive --max-fp-rate 0.01
+
+Uso com seleção pela métrica held-out (FP honesto, medido só na validação):
+    python scripts/automl_anomaly_v3.py --equipment MEQ-01 --mode extensive --select-by heldout
 """
 
 import argparse
@@ -34,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from clearml import Task
 from transpetro_modelos.config import EQUIPMENT_CONFIGS, get_preprocessing_steps
-from transpetro_modelos.data.loading import (load_equipment_data, load_alarm_events)
+from transpetro_modelos.data.loading import load_equipment_data
 from transpetro_modelos.data.preprocessing import PreprocessingArtifacts, run_preprocessing
 from transpetro_modelos.data.splitting import temporal_split
 from transpetro_modelos.models.autoencoder import DenseAutoencoder, LSTMAutoencoder
@@ -60,10 +63,13 @@ from transpetro_modelos.training.train import (
 )
 
 from transpetro_modelos.training.evaluate_multi_failure import compute_balanced_score_multi_failure
+from transpetro_modelos.detector.drift_benchmark import run_drift_benchmark_multi_event
+from transpetro_modelos.detector.drift_detectors import default_detectors
+
 
 ModelType = Literal["dense", "lstm", "ocsvm", "iforest"]
 PresetName = str
-ModeType = Literal["quick", "full", "extensive"]
+ModeType = Literal["quick", "full", "balanced", "extensive"]
 
 def remove_failure_windows(
     df: pd.DataFrame,
@@ -82,28 +88,20 @@ def remove_failure_windows(
         mask_exclude |= (df.index >= window_start) & (df.index < month_end)
     return df[~mask_exclude]
 
-def load_failure_events_by_equipment(
-    alarm_file: str,
-    data_start: pd.Timestamp | None = None, 
-    data_end: pd.Timestamp | None = None,   
-    equipment_col: str = "Tag Alarme",
-    date_col: str = "data",
-) -> dict[str, list[pd.Timestamp]]:
-    if alarm_file.endswith(".csv"):
-        df = pd.read_csv(alarm_file)
-    else:
-        df = pd.read_excel(alarm_file)
-    df[date_col] = pd.to_datetime(df[date_col])
+def get_true_drift_times(config) -> list[pd.Timestamp]:
+    """Espelha a lógica de run_trial(): cobre equipamento com várias falhas
+    (failure_events) OU com uma falha só (failure_date, caso mais comum)."""
+    failure_events = getattr(config, "failure_events", None)
+    failure_date = getattr(config, "failure_date", None)
 
-    if data_start is not None:
-        df = df[df[date_col] >= data_start]
-    if data_end is not None:
-        df = df[df[date_col] <= data_end]
-
-    return {
-        equip_id: sorted(group[date_col].tolist())
-        for equip_id, group in df.groupby(equipment_col)
-    }
+    if failure_events:
+        return [
+            pd.Timestamp(e + "-01") if isinstance(e, str) else pd.Timestamp(e)
+            for e in failure_events
+        ]
+    if failure_date is not None:
+        return [pd.Timestamp(failure_date)]
+    return []
 
 # ════════════════════════════════════════════════════════════════
 # TrialConfig
@@ -367,30 +365,6 @@ def build_trials(
         _debounces = debounce_consecutives or [1]
         _epochs, _patience = 20, 5
 
-        '''    else:  # full
-        _models = models or ["dense", "lstm", "ocsvm", "iforest"]
-        _presets = presets or available_presets
-        _thresholds = thresholds or [90.0, 95.0, 97.5, 99.0]
-        _val_starts = val_start_dates or default_val_starts
-        
-        _layers = dense_layers or [
-            None, (64, 32, 16), (128, 64, 32),
-            (256, 128, 64), (128, 64, 32, 16),
-        ]
-        _lrs = dense_lrs or [1e-3, 5e-4, 1e-4]
-        _batches = batch_sizes or [128, 256, 512]
-        _weight_decays = weight_decays or [0, 1e-5]
-        
-        _seq_lens = seq_lens or [12, 24, 48]
-        _hidden = lstm_hidden_dims or [32, 64, 128]
-        _nlayers = lstm_num_layers or [1, 2, 3]
-        
-        _nus = ocsvm_nus or [0.005, 0.01, 0.05, 0.1]
-        _gammas = ocsvm_gammas or ["scale", "auto", 0.01]
-        _iforest_conts = iforest_contaminations or [0.005, 0.01, 0.05]
-        _iforest_trees = iforest_n_estimators or [100, 200, 500]
-        _debounces = debounce_consecutives or [1, 4, 6]'''
-
     elif mode == "balanced":
         _models = models or ["dense", "lstm", "ocsvm", "iforest"]
         _presets = presets or available_presets[:2]
@@ -535,10 +509,8 @@ def run_trial(
         return None
 
     # ── Remoção de janelas do treino: só para equipamentos com falha
-    # conhecida por MÊS (incerteza de dia). Para eventos com data exata
-    # (seja único, via failure_date, ou múltiplos, via failure_events com
-    # Timestamps), o treino permanece intacto — igual ao comportamento
-    # original do pipeline.
+    # conhecida por MÊS (incerteza de dia). Equipamentos com timestamps
+    # exatos são tratados em outro repositório/pipeline (não aqui).
     failure_events = getattr(config, "failure_events", None)
     train_split = splits["train"]
 
@@ -659,8 +631,27 @@ def run_trial(
         "_model": model,
         "_scores_df": scores_df,
         "_artifacts": artifacts,
+        "_train_errors": train_errors,
     })
     row.update(metrics)
+
+    # ── FP HELD-OUT: taxa de alarme medida na janela de VALIDAÇÃO (fora do
+    # treino), número honesto de falso positivo (o normal_alert_rate padrão cai
+    # majoritariamente no train, que é estruturalmente mais "fácil" porque o
+    # threshold é calibrado nos próprios erros de treino). Aditivo — não altera
+    # o ranking a menos que --select-by heldout seja usado; serve para auditar
+    # quão otimista é o FP in-sample. ──
+    try:
+        sc_db = apply_debounce(scores_df, consecutive=trial.debounce_consecutive)
+        val_lo, val_hi = splits["val"].index.min(), splits["val"].index.max()
+        vmask = (sc_db.index >= val_lo) & (sc_db.index <= val_hi)
+        row["val_fp_rate_heldout"] = (
+            float(sc_db.loc[vmask, "is_anomaly"].mean()) if bool(vmask.any()) else None
+        )
+        row["val_scored_samples"] = int(vmask.sum())
+    except Exception:
+        row["val_fp_rate_heldout"] = None
+        row["val_scored_samples"] = 0
 
     return row
 
@@ -669,27 +660,43 @@ def run_trial(
 # Ranking
 # ════════════════════════════════════════════════════════════════
 
-def rank_results(rows: list[dict[str, Any]], max_fp_rate: float | None = None) -> pd.DataFrame:
-    """Ordena trials com suporte a constraint de FP."""
+def rank_results(
+    rows: list[dict[str, Any]],
+    max_fp_rate: float | None = None,
+    fp_column: str = "normal_alert_rate",
+) -> pd.DataFrame:
+    """Ordena trials com suporte a constraint de FP.
+
+    fp_column: coluna de FP usada na constraint/ordenação. Default
+    "normal_alert_rate" (in-sample, comportamento original). Use
+    "val_fp_rate_heldout" para o FP honesto medido na validação; valores
+    ausentes caem para o normal_alert_rate.
+    """
     df = pd.DataFrame(rows).reset_index(drop=True)
 
+    if fp_column != "normal_alert_rate" and fp_column in df.columns:
+        fp_sel = df[fp_column].fillna(df["normal_alert_rate"])
+    else:
+        fp_sel = df["normal_alert_rate"]
+    df = df.assign(_fp_sel=fp_sel)
+
     if max_fp_rate is not None and max_fp_rate > 0:
-        viable = df[df["normal_alert_rate"] <= max_fp_rate]
+        viable = df[df["_fp_sel"] <= max_fp_rate]
 
         if len(viable) == 0:
             print(f"\nAVISO: Nenhum modelo atingiu max_fp_rate={max_fp_rate:.2%}")
             print("Retornando ordenado por menor taxa de FP...\n")
             return df.sort_values(
-                ["normal_alert_rate", "prefailure_alert_rate"],
+                ["_fp_sel", "prefailure_alert_rate"],
                 ascending=[True, False],
-            ).reset_index(drop=True)
+            ).drop(columns=["_fp_sel"]).reset_index(drop=True)
 
         return viable.sort_values(
-            ["prefailure_alert_rate", "composite_score", "normal_alert_rate"],
+            ["prefailure_alert_rate", "composite_score", "_fp_sel"],
             ascending=[False, False, True],
-        ).reset_index(drop=True)
+        ).drop(columns=["_fp_sel"]).reset_index(drop=True)
 
-    return df.sort_values(
+    return df.drop(columns=["_fp_sel"]).sort_values(
         ["composite_score", "prefailure_alert_rate", "normal_alert_rate"],
         ascending=[False, False, True],
     ).reset_index(drop=True)
@@ -713,7 +720,9 @@ def print_trial_result(result: dict[str, Any]) -> None:
     
     pre = result.get("prefailure_alert_rate", 0.0)
     norm = result.get("normal_alert_rate", 0.0)
-    print(f"{indent}Pre-falha: {pre:.2%}  |  Normal: {norm:.2%}")
+    heldout = result.get("val_fp_rate_heldout")
+    print(f"{indent}Pre-falha: {pre:.2%}  |  Normal (in-sample): {norm:.2%}"
+          + (f"  |  Normal (held-out): {heldout:.2%}" if heldout is not None else ""))
     print(f"{indent}Score: {result['composite_score']:.5f}")
 
 
@@ -735,9 +744,15 @@ def main(
     prefailure_days: int = 30,
     normal_end_days: int = 60,
     max_fp_rate: float | None = None,
+    select_by: str = "insample",
+    drift_benchmark: bool = False,
     clearml_project=None,        
 ) -> None:
-    """Pipeline principal do AutoML."""
+    """Pipeline principal do AutoML.
+
+    select_by: "insample" (default, usa normal_alert_rate — mistura treino) ou
+    "heldout" (usa val_fp_rate_heldout — FP honesto medido só na validação).
+    """
     start_time = time.time()
     config = EQUIPMENT_CONFIGS[equipment_id]
 
@@ -746,6 +761,7 @@ def main(
     print("=" * 70)
     print(f"Equipamento: {equipment_id}")
     print(f"Modo: {mode}")
+    print(f"Seleção por: {select_by}")
     print(f"Max FP Rate: {max_fp_rate:.2%}" if max_fp_rate else "Max FP Rate: ∞ (sem constraint)")
     print("=" * 70 + "\n")
 
@@ -810,6 +826,12 @@ def main(
     n_skipped = 0
     n_failed = 0
 
+    # ── decide qual coluna de FP usar na seleção do melhor trial ──
+    def fp_of(r):
+        if select_by == "heldout" and r.get("val_fp_rate_heldout") is not None:
+            return r["val_fp_rate_heldout"]
+        return r["normal_alert_rate"]
+
     for i, trial in enumerate(trials, 1):
         print_trial_header(i, len(trials), trial)
 
@@ -829,13 +851,13 @@ def main(
             # Atualiza melhor (respeitando constraint de FP)
             should_update = False
             if best_row is None:
-                should_update = max_fp_rate is None or row["normal_alert_rate"] <= max_fp_rate
+                should_update = max_fp_rate is None or fp_of(row) <= max_fp_rate
             else:
                 if max_fp_rate is None:
                     should_update = row["composite_score"] > best_row["composite_score"]
                 else:
-                    row_fp_ok = row["normal_alert_rate"] <= max_fp_rate
-                    best_fp_ok = best_row["normal_alert_rate"] <= max_fp_rate
+                    row_fp_ok = fp_of(row) <= max_fp_rate
+                    best_fp_ok = fp_of(best_row) <= max_fp_rate
                     
                     if row_fp_ok and best_fp_ok:
                         should_update = row["prefailure_alert_rate"] > best_row["prefailure_alert_rate"]
@@ -847,11 +869,13 @@ def main(
                     best_row.pop("_model", None)
                     best_row.pop("_scores_df", None)
                     best_row.pop("_artifacts", None)
+                    best_row.pop("_train_errors", None)
                 best_row = row
             else:
                 row.pop("_model", None)
                 row.pop("_scores_df", None)
                 row.pop("_artifacts", None)
+                row.pop("_train_errors", None) 
 
             rows.append({k: v for k, v in row.items() if not k.startswith("_")})
 
@@ -867,9 +891,14 @@ def main(
     print(f"{'RESULTADOS':^70}")
     print("=" * 70)
 
-    ranking = rank_results(rows, max_fp_rate=max_fp_rate)
+    ranking = rank_results(
+        rows,
+        max_fp_rate=max_fp_rate,
+        fp_column="val_fp_rate_heldout" if select_by == "heldout" else "normal_alert_rate",
+    )
     print("\nTOP 10:\n")
-    print(ranking[[c for c in ["composite_score", "prefailure_alert_rate", "normal_alert_rate", "model"] 
+    print(ranking[[c for c in ["composite_score", "prefailure_alert_rate", "normal_alert_rate",
+                                "val_fp_rate_heldout", "model"]
                    if c in ranking.columns]].head(10).to_string())
 
     if local_artifacts_dir:
@@ -904,6 +933,26 @@ def main(
             scores_path = output_dir / "best_scores.parquet"
             best_row["_scores_df"].to_parquet(scores_path)
             print(f"✓ Scores salvos")
+
+        # ── benchmark de detecção de drift no melhor trial ──
+        if drift_benchmark and "_train_errors" in best_row and best_row["_train_errors"] is not None:
+            np.save(output_dir / "best_train_errors.npy", best_row["_train_errors"])
+
+            true_drift_times = get_true_drift_times(config)
+            if true_drift_times:
+                errors_series = best_row["_scores_df"]["reconstruction_error"]
+                detectors = default_detectors(reference=best_row["_train_errors"])
+                drift_report = run_drift_benchmark_multi_event(
+                    errors_series, detectors, true_drift_times
+                )
+                drift_report.to_csv(output_dir / "drift_detection_benchmark.csv", index=False)
+                print("\nBenchmark de detecção de drift:")
+                print(drift_report.to_string(index=False))
+
+                if upload_to_clearml and task is not None:
+                    task.upload_artifact("drift_detection_benchmark", artifact_object=drift_report)
+            else:
+                print("Sem failure_events/failure_date configurado — pulando benchmark de drift.")
         
         if upload_to_clearml and task is not None:
             print(f"\n Upload ao ClearML...")
@@ -940,6 +989,18 @@ if __name__ == "__main__":
         "--max-fp-rate", type=float, default=0.0,
         help="Taxa máxima de FP permitida (0-1). Use 0 para desabilitar constraint."
     )
+    parser.add_argument(
+        "--select-by", choices=["insample", "heldout"], default="insample",
+        help="FP usado na seleção/ranking do melhor trial: insample (default, "
+             "normal_alert_rate) ou heldout (val_fp_rate_heldout — FP honesto na "
+             "validação; recomendado). Fallback p/ insample se held-out indisponível."
+    )
+    parser.add_argument(
+        "--drift-benchmark", action="store_true",
+        help="Roda benchmark de detectores de drift (KS, PSI, Page-Hinkley, CUSUM, "
+                "ADWIN-lite) sobre o melhor trial, medindo tempo de detecção contra "
+                "failure_events/failure_date do equipamento."
+    )
 
     args = parser.parse_args()
 
@@ -957,5 +1018,7 @@ if __name__ == "__main__":
         prefailure_days=args.prefailure_days,
         normal_end_days=args.normal_end_days,
         max_fp_rate=args.max_fp_rate if args.max_fp_rate > 0 else None,
+        select_by=args.select_by,
+        drift_benchmark=args.drift_benchmark,
         clearml_project=args.clearml_project,
     )
