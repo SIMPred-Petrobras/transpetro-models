@@ -791,23 +791,6 @@ def main(
     df_raw = load_equipment_data(equipment_id, from_clearml=not local_data)
     print(f"  Shape (RAW):        {df_raw.shape}")
 
-    try:
-        raw_events = load_alarm_events(equipment_id, from_clearml=not local_data)
-        filtered_events = [
-            e for e in raw_events
-            if df_raw.index.min() <= e <= df_raw.index.max()
-        ]
-        if filtered_events:
-            import dataclasses
-            config = dataclasses.replace(config, failure_events=filtered_events)
-            EQUIPMENT_CONFIGS[equipment_id] = config
-            print(f"  Eventos de alarme: {len(filtered_events)} de {len(raw_events)} "
-                  f"dentro do período dos dados ({df_raw.index.min()} → {df_raw.index.max()})")
-        else:
-            print(f"  AVISO: nenhum alarme cai dentro do período dos dados.")
-    except FileNotFoundError:
-        print("  AVISO: arquivo de alarmes não encontrado nesse Dataset.")
-
     df_pre, _, _ = run_preprocessing(df_raw, config.pre_split_steps)
     print(f"  Shape: {df_pre.shape}\n")
 

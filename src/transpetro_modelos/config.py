@@ -77,12 +77,6 @@ RAW_PRESETS = {
     if k.endswith("_raw")
 }
 
-RAW_NO_COMMON_PRESETS = {
-    k: deepcopy(v)
-    for k, v in PREPROCESSING_PIPELINES.items()
-    if k.endswith("_no_common")
-}
-
 INTERPOLATED_PRESETS = {
     k: deepcopy(v)
     for k, v in PREPROCESSING_PIPELINES.items()
