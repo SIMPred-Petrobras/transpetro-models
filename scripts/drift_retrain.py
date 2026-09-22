@@ -381,6 +381,12 @@ def plotar_timeline(
         ax.plot(full_scores.index, full_scores["reconstruction_error"],
                 color="steelblue", linewidth=0.7, alpha=0.8, label="Erro de reconstrução")
 
+        anomalias = full_scores[full_scores["is_anomaly"]]
+        if not anomalias.empty:
+            ax.scatter(anomalias.index, anomalias["reconstruction_error"],
+                      color="black", s=14, zorder=4, edgecolor="none",
+                      label=f"Anomalia detectada ({len(anomalias)})")
+
         for _, row in retrain_log.iterrows():
             era_pontos = full_scores[full_scores["era"] == row["era"]]
             if era_pontos.empty:
@@ -447,25 +453,29 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--equipment", required=True, choices=list(EQUIPMENT_CONFIGS.keys()))
     parser.add_argument("--local-data", action="store_true")
-    parser.add_argument("--model", default="dense", choices=["dense", "lstm", "ocsvm", "iforest"])
+    parser.add_argument("--models", nargs="+", default=None,
+                        choices=["dense", "lstm", "ocsvm", "iforest"],
+                        help="Quais modelos testar (default: os 4)")
+    parser.add_argument("--presets", nargs="+", default=None,
+                        help="Quais presets de preprocessing testar (default: todos os "
+                             "disponíveis pro equipamento, via config.preprocess_presets)")
     parser.add_argument("--threshold-percentile", type=float, default=99.0)
     parser.add_argument("--detectors", nargs="+", default=None,
                         choices=["ks_test", "ks_test_w100", "psi", "page_hinkley", "cusum", "adwin_lite"],
-                        help="Quais técnicas testar (default: todas as 6)")
+                        help="Quais técnicas de drift testar (default: todas as 6)")
     parser.add_argument("--initial-train-days", type=int, default=None,
                         help="Dias pro baseline inicial. Default: descoberto automaticamente "
-                             "via curva de aprendizado (cresce a janela até parar de ajudar).")
+                             "por preset (curva de aprendizado, independente do modelo).")
     parser.add_argument("--min-era-days", type=int, default=None,
                         help="Idade mínima de uma era antes de aceitar retreino. Default: "
                              "derivado automaticamente do requisito estatístico de cada detector.")
     parser.add_argument("--chunk-days", type=int, default=7)
-    parser.add_argument("--preset", default="baseline")
     parser.add_argument("--prefailure-days", type=int, default=30)
     parser.add_argument("--normal-end-days", type=int, default=60)
     parser.add_argument("--output-dir", default="drift_retrain_out")
     parser.add_argument(
         "--max-fp-rate", type=float, default=0.0,
-        help="Taxa máxima de FP aceitável (0-1). Técnicas acima disso são marcadas "
+        help="Taxa máxima de FP aceitável (0-1). Combinações acima disso são marcadas "
              "como reprovadas no resumo. Use 0 para desabilitar."
     )
     # ── ClearML (mesmo padrão do automl_anomaly_v3.py) ──
@@ -490,7 +500,7 @@ def main():
 
         task = Task.init(
             project_name=args.clearml_project,
-            task_name=f"drift_retrain_{args.equipment}_{args.model}",
+            task_name=f"drift_retrain_{args.equipment}_grid",
             output_uri=True,
             reuse_last_task_id=False,
         )
@@ -509,14 +519,36 @@ def main():
     df_pre, _, _ = run_preprocessing(df_raw, config.pre_split_steps)
     print(f"  Shape: {df_pre.shape} | {df_pre.index.min()} → {df_pre.index.max()}")
 
-    initial_train_days = args.initial_train_days
-    if initial_train_days is None:
-        initial_train_days = auto_initial_train_days(df_pre, args.equipment, args.preset)
-    else:
-        print(f"[manual] usando --initial-train-days {initial_train_days} (informado explicitamente)")
-
+    # ── resolve a grade: modelos x presets x detectores ──
+    model_names = args.models or ["dense", "lstm", "ocsvm", "iforest"]
+    available_presets = (
+        list(config.preprocess_presets.keys())
+        if getattr(config, "preprocess_presets", None) else ["baseline"]
+    )
+    preset_names = args.presets or available_presets
     detector_names = args.detectors or list(default_detectors(reference=np.array([0.0, 1.0])).keys())
-    print(f"\nTestando {len(detector_names)} técnica(s): {', '.join(detector_names)}\n")
+
+    total_combos = len(model_names) * len(preset_names) * len(detector_names)
+    print(f"\nGrade: {len(model_names)} modelo(s) x {len(preset_names)} preset(s) x "
+          f"{len(detector_names)} técnica(s) = {total_combos} combinações")
+    print(f"  Modelos:  {model_names}")
+    print(f"  Presets:  {preset_names}")
+    print(f"  Técnicas: {detector_names}")
+    if total_combos > 20:
+        print(f"  [aviso] {total_combos} combinações é BASTANTE — cada uma treina o modelo "
+              f"do zero a cada retreino disparado. Considere restringir com --models / "
+              f"--presets / --detectors se o tempo de execução for um problema.\n")
+
+    # janela inicial: depende só do PREPROCESSING (preset), não do modelo —
+    # calcula uma vez por preset e reaproveita entre os modelos
+    janela_inicial_por_preset: dict[str, int] = {}
+    if args.initial_train_days is not None:
+        for p in preset_names:
+            janela_inicial_por_preset[p] = args.initial_train_days
+        print(f"[manual] usando --initial-train-days {args.initial_train_days} pra todos os presets")
+    else:
+        for p in preset_names:
+            janela_inicial_por_preset[p] = auto_initial_train_days(df_pre, args.equipment, p)
 
     output_dir = Path(args.output_dir) / f"{args.equipment}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -525,93 +557,103 @@ def main():
         [config.failure_date] if getattr(config, "failure_date", None) else None
     )
 
-    resultados_plot: dict[str, tuple] = {}
     resumo_linhas = []
+    n_erros = 0
 
-    for nome in detector_names:
-        print(f"{'=' * 70}\n{nome}\n{'=' * 70}")
-        try:
-            full_scores, retrain_log = drift_triggered_walkforward(
-                df_pre, args.equipment, args.model, args.threshold_percentile, nome, device,
-                initial_train_days=initial_train_days, min_era_days=args.min_era_days,
-                chunk_days=args.chunk_days, preset=args.preset,
-            )
-        except Exception as exc:
-            print(f"  [ERRO] {nome} falhou: {type(exc).__name__}: {exc}")
-            continue
+    for model_name in model_names:
+        for preset_name in preset_names:
+            resultados_combo: dict[str, tuple] = {}
+            print(f"\n{'#' * 70}\n# modelo={model_name} | preset={preset_name}\n{'#' * 70}")
 
-        retrain_log.to_csv(output_dir / f"retrain_log_{nome}.csv", index=False)
-        full_scores.to_parquet(output_dir / f"full_scores_{nome}.parquet")
-        plotar_timeline(
-            full_scores, retrain_log, output_dir / f"timeline_{nome}.png",
-            failure_events=failure_events,
-            title=f"{args.equipment} — {args.model} + {nome}",
-        )
+            for nome_detector in detector_names:
+                print(f"{'=' * 70}\n{model_name} | {preset_name} | {nome_detector}\n{'=' * 70}")
+                try:
+                    full_scores, retrain_log = drift_triggered_walkforward(
+                        df_pre, args.equipment, model_name, args.threshold_percentile,
+                        nome_detector, device,
+                        initial_train_days=janela_inicial_por_preset[preset_name],
+                        min_era_days=args.min_era_days,
+                        chunk_days=args.chunk_days, preset=preset_name,
+                    )
+                except Exception as exc:
+                    print(f"  [ERRO] {model_name}|{preset_name}|{nome_detector} falhou: "
+                          f"{type(exc).__name__}: {exc}")
+                    n_erros += 1
+                    continue
 
-        n_retreinos = len(retrain_log) - 1 if len(retrain_log) else 0
-        metrics = pontuar_resultado(full_scores, config, args.prefailure_days, args.normal_end_days)
-        resumo_linhas.append({
-            "detector": nome, "n_retreinos": n_retreinos,
-            "composite_score": metrics.get("composite_score"),
-            "prefailure_alert_rate": metrics.get("prefailure_alert_rate"),
-            "normal_alert_rate": metrics.get("normal_alert_rate"),
-        })
-        resultados_plot[nome] = (full_scores, retrain_log)
-        print(f"  {n_retreinos} retreino(s) | composite_score={metrics.get('composite_score')}")
+                prefixo = f"{model_name}_{preset_name}_{nome_detector}"
+                retrain_log.to_csv(output_dir / f"retrain_log_{prefixo}.csv", index=False)
+                full_scores.to_parquet(output_dir / f"full_scores_{prefixo}.parquet")
+                plotar_timeline(
+                    full_scores, retrain_log, output_dir / f"timeline_{prefixo}.png",
+                    failure_events=failure_events,
+                    title=f"{args.equipment} — {model_name}|{preset_name} + {nome_detector}",
+                )
 
-    if not resultados_plot:
-        raise RuntimeError("Nenhuma técnica rodou com sucesso.")
+                n_retreinos = len(retrain_log) - 1 if len(retrain_log) else 0
+                metrics = pontuar_resultado(full_scores, config, args.prefailure_days, args.normal_end_days)
+                resumo_linhas.append({
+                    "model": model_name, "preset": preset_name, "detector": nome_detector,
+                    "n_retreinos": n_retreinos,
+                    "composite_score": metrics.get("composite_score"),
+                    "prefailure_alert_rate": metrics.get("prefailure_alert_rate"),
+                    "normal_alert_rate": metrics.get("normal_alert_rate"),
+                })
+                resultados_combo[nome_detector] = (full_scores, retrain_log)
+                print(f"  {n_retreinos} retreino(s) | composite_score={metrics.get('composite_score')}")
+
+            # gráfico comparativo das técnicas, UMA vez por combinação modelo+preset
+            if resultados_combo:
+                plotar_comparativo(
+                    resultados_combo,
+                    output_dir / f"timeline_comparativa_{model_name}_{preset_name}.png",
+                    failure_events=failure_events,
+                    title=f"{args.equipment} — {model_name}|{preset_name}: comparação de técnicas",
+                )
+
+    if not resumo_linhas:
+        raise RuntimeError("Nenhuma combinação rodou com sucesso.")
 
     resumo = pd.DataFrame(resumo_linhas)
 
-    # ── constraint de FP: marca quem ficou dentro do teto ──
     if args.max_fp_rate and args.max_fp_rate > 0:
         resumo["aprovado"] = resumo["normal_alert_rate"].fillna(1.0) <= args.max_fp_rate
         n_aprovados = int(resumo["aprovado"].sum())
         print(f"\n[constraint] max_fp_rate={args.max_fp_rate:.2%} → "
-              f"{n_aprovados}/{len(resumo)} técnica(s) dentro do teto")
+              f"{n_aprovados}/{len(resumo)} combinação(ões) dentro do teto")
         resumo = resumo.sort_values(["aprovado", "composite_score"], ascending=[False, False])
     else:
         resumo = resumo.sort_values("composite_score", ascending=False)
 
     resumo.to_csv(output_dir / "resumo_tecnicas.csv", index=False)
-    print(f"\n{'=' * 70}\nRESUMO — TÉCNICAS COMPARADAS\n{'=' * 70}")
-    print(resumo.to_string(index=False))
-
-    fig_comparativa = plotar_comparativo(
-        resultados_plot, output_dir / "timeline_comparativa.png",
-        failure_events=failure_events,
-        title=f"{args.equipment} — {args.model}: comparação de técnicas de drift",
-    )
+    print(f"\n{'=' * 70}\nRESUMO — TOP 15 COMBINAÇÕES\n{'=' * 70}")
+    print(resumo.head(15).to_string(index=False))
+    print(f"\n{len(resumo)} combinações no total | {n_erros} falharam | "
+          f"resumo completo em resumo_tecnicas.csv")
 
     print(f"\n✓ Resultados salvos em: {output_dir.resolve()}")
 
-    # ── upload ao ClearML ──
     if task is not None and not args.no_clearml_upload:
         print("\nUpload ao ClearML...")
         task.upload_artifact("resumo_tecnicas", artifact_object=resumo)
-        for nome, (full_scores, retrain_log) in resultados_plot.items():
-            task.upload_artifact(f"retrain_log_{nome}", artifact_object=retrain_log)
-            task.upload_artifact(f"full_scores_{nome}", artifact_object=full_scores)
 
         logger = task.get_logger()
-        for _, row in resumo.iterrows():
+        top20 = resumo.head(20)
+        for i, row in top20.iterrows():
+            rotulo = f"{row['model']}|{row['preset']}|{row['detector']}"
             if row.get("composite_score") is not None:
-                logger.report_scalar("drift/composite_score", row["detector"],
+                logger.report_scalar("drift/composite_score", rotulo,
                                      float(row["composite_score"]), 0)
-            logger.report_scalar("drift/n_retreinos", row["detector"],
-                                 float(row["n_retreinos"]), 0)
+            logger.report_scalar("drift/n_retreinos", rotulo, float(row["n_retreinos"]), 0)
 
-        for nome in resultados_plot:
-            img = output_dir / f"timeline_{nome}.png"
+        # só sobe imagens do TOP 5, pra não estourar o limite de payload do ClearML
+        for _, row in resumo.head(5).iterrows():
+            prefixo = f"{row['model']}_{row['preset']}_{row['detector']}"
+            img = output_dir / f"timeline_{prefixo}.png"
             if img.exists():
-                logger.report_image("timelines", nome, local_path=str(img), iteration=0)
-        comparativa = output_dir / "timeline_comparativa.png"
-        if comparativa.exists():
-            logger.report_image("timelines", "comparativa",
-                                local_path=str(comparativa), iteration=0)
+                logger.report_image("timelines_top5", prefixo, local_path=str(img), iteration=0)
 
-        logger.report_table("resumo", "tecnicas", table_plot=resumo)
+        logger.report_table("resumo", "grade_completa", table_plot=resumo)
         print("✓ Upload completo")
 
 

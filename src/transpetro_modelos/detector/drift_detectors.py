@@ -68,47 +68,121 @@ class BaseDriftDetector(ABC):
 # ════════════════════════════════════════════════════════════════
 
 class KSDriftDetector(BaseDriftDetector):
-    """Compara janela de referência (dados "normais" conhecidos) contra uma
-    janela deslizante do stream atual via teste KS de duas amostras.
+    """KS univariado por feature, com agregação para decisão multivariada.
 
-    Dispara quando p-value < alpha, ou seja, quando as duas distribuições
-    deixam de ser estatisticamente compatíveis.
+    A referência pode ser:
+      - 1D: comportamento original, para uma série contínua;
+      - 2D: matriz/DataFrame (amostras x features). Nesse caso, um KS de
+        duas amostras é executado separadamente em cada feature e o detector
+        dispara quando pelo menos `min_features` features apresentam
+        p-value < alpha.
+
+    Isso mantém o KS estatisticamente univariado por variável, mas permite
+    uma decisão global de drift sobre um conjunto de variáveis.
     """
 
     name = "ks_test"
 
     def __init__(
         self,
-        reference: np.ndarray,
+        reference: np.ndarray | pd.DataFrame,
         window_size: int = 50,
         alpha: float = 0.01,
         stride: int = 1,
+        min_features: int | None = None,
+        min_drift_fraction: float = 0.10,
     ) -> None:
         super().__init__()
-        self.reference = np.asarray(reference, dtype=float)
+
+        ref = np.asarray(reference, dtype=float)
+        if ref.ndim == 1:
+            ref = ref.reshape(-1, 1)
+
+        if ref.ndim != 2:
+            raise ValueError("reference deve ser 1D ou 2D.")
+
+        self.reference = ref
         self.window_size = window_size
         self.alpha = alpha
         self.stride = stride
-        self._buffer: list[float] = []
+        self.min_drift_fraction = min_drift_fraction
+
+        n_features = ref.shape[1]
+        if min_features is None:
+            min_features = max(1, int(np.ceil(n_features * min_drift_fraction)))
+        self.min_features = min(min_features, n_features)
+
+        self._buffer: list[np.ndarray] = []
         self._since_last_test = 0
 
+        # Útil para auditoria: guardar o resultado do último teste.
+        self.last_p_values: np.ndarray | None = None
+        self.last_drift_mask: np.ndarray | None = None
+
     def _update(self, x: float) -> bool:
-        self._buffer.append(x)
+        # Mantém compatibilidade com a interface antiga para KS 1D.
+        return self._update_vector(np.asarray([x], dtype=float))
+
+    def update(self, x) -> bool:
+        """Recebe escalar (modo antigo) ou vetor de features."""
+        if self._in_alarm:
+            return False
+
+        arr = np.asarray(x, dtype=float).reshape(-1)
+
+        if arr.size != self.reference.shape[1]:
+            raise ValueError(
+                f"KS recebeu {arr.size} feature(s), mas a referência tem "
+                f"{self.reference.shape[1]}."
+            )
+
+        fired = self._update_vector(arr)
+        if fired:
+            self._in_alarm = True
+        return fired
+
+    def _update_vector(self, x: np.ndarray) -> bool:
+        self._buffer.append(x.copy())
         if len(self._buffer) > self.window_size:
             self._buffer.pop(0)
 
         self._since_last_test += 1
         if len(self._buffer) < self.window_size or self._since_last_test < self.stride:
             return False
+
         self._since_last_test = 0
 
-        _, p_value = stats.ks_2samp(self.reference, np.array(self._buffer))
-        return bool(p_value < self.alpha)
+        current = np.asarray(self._buffer, dtype=float)
+        p_values = np.ones(self.reference.shape[1], dtype=float)
+
+        for j in range(self.reference.shape[1]):
+            ref_j = self.reference[:, j]
+            cur_j = current[:, j]
+
+            # Remove NaN/inf para o KS não quebrar.
+            ref_j = ref_j[np.isfinite(ref_j)]
+            cur_j = cur_j[np.isfinite(cur_j)]
+
+            if len(ref_j) == 0 or len(cur_j) == 0:
+                p_values[j] = 1.0
+                continue
+
+            _, p_values[j] = stats.ks_2samp(ref_j, cur_j)
+
+        drift_mask = p_values < self.alpha
+        n_drift = int(drift_mask.sum())
+
+        self.last_p_values = p_values
+        self.last_drift_mask = drift_mask
+
+        return n_drift >= self.min_features
 
     def reset(self) -> None:
         super().reset()
         self._buffer.clear()
         self._since_last_test = 0
+        self.last_p_values = None
+        self.last_drift_mask = None
 
 
 # ════════════════════════════════════════════════════════════════
@@ -304,16 +378,27 @@ class ADWINLiteDetector(BaseDriftDetector):
 # Fábrica padrão de detectores para o benchmark
 # ════════════════════════════════════════════════════════════════
 
-def default_detectors(reference: np.ndarray) -> dict[str, BaseDriftDetector]:
-    """Conjunto padrão de detectores, todos calibrados a partir da mesma
-    janela de referência (ex.: erros de reconstrução do período de treino,
-    que representa "operação normal").
+def default_detectors(reference: np.ndarray | pd.DataFrame) -> dict[str, BaseDriftDetector]:
+    """Conjunto padrão de detectores.
+
+    Para referência 2D (amostras x features), KS opera feature a feature.
+    Os demais detectores continuam univariados e, portanto, exigem uma
+    referência 1D.
     """
+    ref = np.asarray(reference, dtype=float)
+
+    if ref.ndim != 1:
+        raise ValueError(
+            "default_detectors(): os detectores PSI/Page-Hinkley/CUSUM/ADWIN "
+            "continuam univariados. Para KS multifeature, instancie KSDriftDetector "
+            "diretamente com a matriz de referência."
+        )
+
     return {
-        "ks_test": KSDriftDetector(reference, window_size=50, alpha=0.01),
-        "ks_test_w100": KSDriftDetector(reference, window_size=100, alpha=0.01),
-        "psi": PSIDriftDetector(reference, window_size=50, threshold=0.2),
+        "ks_test": KSDriftDetector(ref, window_size=50, alpha=0.01),
+        "ks_test_w100": KSDriftDetector(ref, window_size=100, alpha=0.01),
+        "psi": PSIDriftDetector(ref, window_size=50, threshold=0.2),
         "page_hinkley": PageHinkleyDetector(delta=0.005, threshold=50.0),
-        "cusum": CUSUMDriftDetector(reference, threshold=5.0),
+        "cusum": CUSUMDriftDetector(ref, threshold=5.0),
         "adwin_lite": ADWINLiteDetector(max_window=200, min_subwindow=15, threshold=3.0),
     }
