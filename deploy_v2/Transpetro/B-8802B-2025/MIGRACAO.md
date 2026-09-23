@@ -72,7 +72,7 @@ As duas pastas coexistem de propósito (histórico/comparação). **Em produçã
    cd Transpetro/
    python3 B-8802B-2025/scripts/b8802b2025_exemplo.py
    ```
-   Saída esperada com o CSV de exemplo (jan/2025 → 10/ago/2026): **~139 mil instantes · ~65 alarmes · 4 episódios**
+   Saída esperada com o CSV de exemplo (jan/2025 → 10/ago/2026): **~139 mil instantes · ~55 alarmes · 4 episódios**
    (06/12/2025, 17/01/2026, 24/07/2026, 10/08/2026). Se os números baterem, a integração está correta.
 4. (Opcional) Compare com o antigo rodando `B-8802B/scripts/b8802b_exemplo.py` sobre o mesmo CSV: ele deve dar
    **~12% de alarme** — é a evidência do drift.
