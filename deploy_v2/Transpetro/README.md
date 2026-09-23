@@ -112,3 +112,9 @@ a pasta `B-8802B/` (modelo de 2022) foi mantida **intacta para comparação**. E
   (`debounce_min`/`debounce_window` no `alarm.json`).
 
 Guia de migração passo a passo (o que muda, como validar, rollback): **`B-8802B-2025/MIGRACAO.md`**.
+
+## Monitoramento semanal (drift)
+
+O pacote inclui `monitor_drift.py`: um passo opcional, rodado 1× por semana sobre o CSV que a própria
+inferência gera, que acende verde/amarelo/vermelho quando o "normal" da operação se afasta do que o modelo
+aprendeu (mudança de conceito). Guia de operação: **`MONITORAMENTO.md`**.

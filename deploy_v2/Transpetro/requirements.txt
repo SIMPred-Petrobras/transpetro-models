@@ -9,3 +9,4 @@ numpy>=2.4,<3
 pandas>=3.0,<4
 scikit-learn>=1.8,<1.9
 torch>=2.11,<3
+scipy  # usado só pelo monitor_drift.py (indicador M6); a inferência não precisa
