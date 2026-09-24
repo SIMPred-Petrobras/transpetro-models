@@ -12,6 +12,8 @@ Detectores implementados:
     - PageHinkleyDetector    : detecção sequencial de mudança de média (online, O(1))
     - CUSUMDriftDetector     : soma cumulativa (online, O(1))
     - ADWINLiteDetector      : janela adaptativa simplificada (sem dependência externa)
+    - CalibratedKSDetector   : KS com limiar do D calibrado na referência + persistência
+                               (o detector adotado no monitor de produção; lê/grava drift_ref.json)
 
 Todos herdam de `BaseDriftDetector`, então dá pra adicionar novos detectores
 sem mexer no benchmark.
@@ -375,6 +377,170 @@ class ADWINLiteDetector(BaseDriftDetector):
 
 
 # ════════════════════════════════════════════════════════════════
+# KS calibrado (limiar empírico do estatístico D + persistência)
+# ════════════════════════════════════════════════════════════════
+
+class CalibratedKSDetector(BaseDriftDetector):
+    """KS por feature com limiar do estatístico D calibrado na própria referência.
+
+    Diferenças para o KSDriftDetector (p-valor):
+      - não usa p-valor: em série autocorrelacionada ele sai minúsculo para
+        diferenças triviais. O limiar de cada feature é o MAIOR D observado ao
+        comparar cada janela da própria referência com a referência inteira
+        ("diferente demais" = mais diferente do que o normal já é de si mesmo);
+      - janelas não sobrepostas de `window_size` pontos (288 = 1 dia a 5 min);
+      - persistência: só dispara quando `k_consecutive` das últimas
+        `persistence_window` janelas têm pelo menos uma feature acima do limiar
+        (padrão 3 de 5 dias; `persistence_window=None` = k janelas seguidas).
+        Filtra transientes (mudança de conceito precisa ser perene) sem
+        depender do alinhamento das janelas: no drift real do B-8802B os dias
+        acima do limiar vêm intercalados, e a regra de dias SEGUIDOS variava de
+        3,4 a 75,7 dias conforme o alinhamento; 3-de-5 fica entre 3,4 e 8,4
+        dias, com zero falso disparo no controle sem drift;
+      - informa quais features causaram o disparo (`last_drift_features`).
+
+    O estado calibrado (amostras de referência + limiares) é o mesmo formato
+    do `drift_ref.json` gravado nos bundles por `scripts/monitor_drift.py
+    --make-drift-ref`: use `from_drift_ref()` / `to_drift_ref()`.
+    """
+
+    name = "ks_calibrado"
+
+    def __init__(
+        self,
+        reference: np.ndarray | pd.DataFrame | None = None,
+        window_size: int = 288,
+        k_consecutive: int = 3,
+        n_reference: int = 5000,
+        persistence_window: int | None = 5,
+        feature_names: list[str] | None = None,
+        seed: int = 0,
+        *,
+        samples: list[np.ndarray] | None = None,
+        d_crit: list[float] | None = None,
+    ) -> None:
+        super().__init__()
+        self.window_size = window_size
+        self.k_consecutive = k_consecutive
+        # None = k janelas CONSECUTIVAS; n = k janelas acima dentre as últimas n (tolera dia intercalado)
+        self.persistence_window = persistence_window
+
+        if samples is not None and d_crit is not None:
+            self.samples = [np.asarray(v, dtype=float) for v in samples]
+            self.d_crit = [float(v) for v in d_crit]
+            self.feature_names = list(feature_names) if feature_names else [f"x{j}" for j in range(len(self.samples))]
+        else:
+            if reference is None:
+                raise ValueError("informe `reference` ou (`samples` e `d_crit`).")
+            if isinstance(reference, pd.DataFrame) and feature_names is None:
+                feature_names = [str(c) for c in reference.columns]
+            ref = np.asarray(reference, dtype=float)
+            if ref.ndim == 1:
+                ref = ref.reshape(-1, 1)
+            self.feature_names = list(feature_names) if feature_names else [f"x{j}" for j in range(ref.shape[1])]
+            rng = np.random.default_rng(seed)
+            self.samples, self.d_crit = [], []
+            for j in range(ref.shape[1]):
+                col = ref[:, j][np.isfinite(ref[:, j])]
+                if len(col) < 2 * window_size:
+                    raise ValueError(
+                        f"referência de '{self.feature_names[j]}' tem {len(col)} pontos; "
+                        f"são necessários pelo menos {2 * window_size} (2 janelas)."
+                    )
+                sample = rng.choice(col, size=min(len(col), n_reference), replace=False)
+                dmax = max(
+                    stats.ks_2samp(sample, col[i:i + window_size]).statistic
+                    for i in range(0, len(col) - window_size, window_size)
+                )
+                self.samples.append(sample)
+                self.d_crit.append(float(dmax))
+
+        self._buffer: list[np.ndarray] = []
+        self._runs: list[set[str]] = []
+        self.last_d: np.ndarray | None = None
+        self.last_drift_features: list[str] = []
+
+    @classmethod
+    def from_drift_ref(cls, drift_ref: dict | str) -> "CalibratedKSDetector":
+        """Constrói o detector a partir de um drift_ref.json (dict ou caminho)."""
+        if not isinstance(drift_ref, dict):
+            import json
+            from pathlib import Path
+            drift_ref = json.loads(Path(drift_ref).read_text())
+        names = list(drift_ref["sensors"])
+        return cls(
+            window_size=int(drift_ref["win"]),
+            k_consecutive=int(drift_ref["k_consec"]),
+            persistence_window=drift_ref.get("n_window"),
+            feature_names=names,
+            samples=[drift_ref["sensors"][c]["sample"] for c in names],
+            d_crit=[drift_ref["sensors"][c]["d_crit"] for c in names],
+        )
+
+    def to_drift_ref(self, reference_window: list[str] | None = None, n_keep: int = 2000) -> dict:
+        """Serializa no formato do drift_ref.json dos bundles."""
+        rng = np.random.default_rng(0)
+        sensors = {}
+        for name, sample, dc in zip(self.feature_names, self.samples, self.d_crit):
+            keep = rng.choice(sample, size=min(len(sample), n_keep), replace=False)
+            sensors[name] = {"d_crit": float(dc), "sample": [round(float(v), 4) for v in keep]}
+        out = {"reference_window": reference_window, "win": self.window_size,
+               "k_consec": self.k_consecutive, "sensors": sensors}
+        if self.persistence_window is not None:
+            out["n_window"] = self.persistence_window
+        return out
+
+    def _update(self, x: float) -> bool:
+        return self.update(x)
+
+    def update(self, x) -> bool:
+        """Recebe um ponto (escalar ou vetor com uma posição por feature)."""
+        if self._in_alarm:
+            return False
+        arr = np.asarray(x, dtype=float).reshape(-1)
+        if arr.size != len(self.samples):
+            raise ValueError(f"esperado {len(self.samples)} feature(s), recebido {arr.size}.")
+        self._buffer.append(arr)
+        if len(self._buffer) < self.window_size:
+            return False
+
+        current = np.asarray(self._buffer, dtype=float)
+        self._buffer.clear()
+        d = np.zeros(len(self.samples))
+        above: set[str] = set()
+        for j, (sample, dc) in enumerate(zip(self.samples, self.d_crit)):
+            cur = current[:, j][np.isfinite(current[:, j])]
+            if len(cur) == 0:
+                continue
+            d[j] = stats.ks_2samp(sample, cur).statistic
+            if d[j] > dc:
+                above.add(self.feature_names[j])
+        self.last_d = d
+
+        if self.persistence_window is None:
+            self._runs = self._runs + [above] if above else []
+            if len(self._runs) < self.k_consecutive:
+                return False
+            recent = self._runs[-self.k_consecutive:]
+        else:
+            self._runs = (self._runs + [above])[-self.persistence_window:]
+            recent = [r for r in self._runs if r]
+            if len(recent) < self.k_consecutive:
+                return False
+        common = set.intersection(*recent) or set().union(*recent)
+        self.last_drift_features = sorted(common)
+        self._runs = []
+        self._in_alarm = True
+        return True
+
+    def reset(self) -> None:
+        super().reset()
+        self._buffer.clear()
+        self._runs = []
+        self.last_d = None
+
+
+# ════════════════════════════════════════════════════════════════
 # Fábrica padrão de detectores para o benchmark
 # ════════════════════════════════════════════════════════════════
 
@@ -397,6 +563,7 @@ def default_detectors(reference: np.ndarray | pd.DataFrame) -> dict[str, BaseDri
     return {
         "ks_test": KSDriftDetector(ref, window_size=50, alpha=0.01),
         "ks_test_w100": KSDriftDetector(ref, window_size=100, alpha=0.01),
+        "ks_calibrado": CalibratedKSDetector(ref),
         "psi": PSIDriftDetector(ref, window_size=50, threshold=0.2),
         "page_hinkley": PageHinkleyDetector(delta=0.005, threshold=50.0),
         "cusum": CUSUMDriftDetector(ref, threshold=5.0),
