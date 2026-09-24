@@ -45,6 +45,7 @@ de 5 min).
 | **M3 erro relativo** | mediana do erro na semana ÷ μ do treino (`alarm.json → threshold_calibration.mean_normal`) | quanto o "normal atual" está longe do "normal aprendido" — sobe **antes** do alarme |
 | **M4 cobertura** | instantes válidos na semana (esperado ≈ 2016 a 5 min) | qualidade de dado / sensor fora; uma semana vazia não é "verde" |
 | **M5 saturação do clip** | fração dos instantes em que um sensor está **fora da faixa de clip do treino** (p1–p99,9); reporta-se o pior sensor | drift **por omissão**: fora da faixa o valor é truncado e o modelo deixa de ver o sensor — o alarme não cai, a **sensibilidade** cai. Exige o CSV bruto (`--dados`) |
+| **M6 KS diário por sensor** | teste de Kolmogorov–Smirnov de cada dia de operação contra a amostra de referência do treino, por sensor; limiar do estatístico D calibrado na própria referência; dispara quando **3 dos últimos 5 dias** ficam acima do limiar | o detector mais rápido de mudança de conceito (~4 dias no drift real do B-8802B) e diz **via qual sensor** mudou; calibração guardada no `drift_ref.json` do bundle |
 
 **Valores de referência medidos no B-8802B (84 semanas, jan/25 → ago/26):**
 

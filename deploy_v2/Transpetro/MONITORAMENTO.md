@@ -46,7 +46,7 @@ inferência aponta. Por isso o monitor nunca deve silenciar um alarme.
 - **cobertura** — semanas com pouco dado válido não contam como "verde";
 - **M5 — saturação de faixa** — % do tempo com um sensor fora da faixa em que o modelo foi treinado (ali o
   modelo fica "cego" àquele sensor);
-- **M6 — teste estatístico diário (Kolmogorov–Smirnov)** — compara cada dia com a referência do treino
+- **M6 — teste estatístico diário (Kolmogorov–Smirnov)** — dispara quando 3 dos últimos 5 dias ficam diferentes da referência; compara cada dia com a referência do treino
   (arquivo `drift_ref.json` dentro do bundle); é o detector mais rápido (~3 dias).
 
 Os limiares e o processo completo (quando recalibrar, quando retreinar, quem decide) estão na política do time

@@ -90,8 +90,9 @@ def clip_saturation(dados_csv: Path, bundle_dir: Path, freq: str) -> pd.DataFram
 # Calibração (--make-drift-ref) grava drift_ref.json DENTRO do bundle: amostra de referência por sensor
 # + limiar do estatístico D auto-calibrado (máximo do D diário dentro da própria referência — absorve
 # autocorrelação e regimes normais; validado: 2,6-4 d de atraso nos drifts rotulados, 0 falsos com
-# referência de 12 meses). Dispara com K_CONSEC dias consecutivos acima do limiar em algum sensor.
-M6_WIN, M6_KCONSEC, M6_NREF = 288, 3, 2000
+# referência de 12 meses). Dispara quando K_CONSEC dos últimos N_WIN dias têm algum sensor acima do
+# limiar (3 de 5: tolera o dia intercalado do drift real sem depender do alinhamento das janelas).
+M6_WIN, M6_KCONSEC, M6_NWIN, M6_NREF = 288, 3, 5, 2000
 
 
 def _temporal_steps(bundle_dir: Path, df):
@@ -115,7 +116,8 @@ def make_drift_ref(dados_csv: Path, bundle_dir: Path, ref_start=None, ref_end=No
     df = _temporal_steps(bundle_dir, si.carregar_dados(dados_csv))
     ref = df[(df.index >= pd.Timestamp(ref_start)) & (df.index <= pd.Timestamp(ref_end))]
     rng = np.random.default_rng(0)
-    out = {"reference_window": [str(ref_start), str(ref_end)], "win": M6_WIN, "k_consec": M6_KCONSEC, "sensors": {}}
+    out = {"reference_window": [str(ref_start), str(ref_end)], "win": M6_WIN, "k_consec": M6_KCONSEC,
+           "n_window": M6_NWIN, "sensors": {}}
     for c in ref.columns:
         vals = ref[c].dropna().values
         sample = rng.choice(vals, size=min(len(vals), 5000), replace=False)
@@ -132,16 +134,22 @@ def ks_daily_fires(dados_csv: Path, bundle_dir: Path):
     from scipy.stats import ks_2samp
     ref = json.loads((bundle_dir / "drift_ref.json").read_text())
     df = _temporal_steps(bundle_dir, si_carregar(bundle_dir, dados_csv))
-    win, k = ref["win"], ref["k_consec"]
+    win, k, n = ref["win"], ref["k_consec"], ref.get("n_window")
     samples = {c: np.asarray(v["sample"]) for c, v in ref["sensors"].items() if c in df.columns}
     dcrit = {c: ref["sensors"][c]["d_crit"] for c in samples}
     fires, run_above = [], []
     for i in range(0, len(df) - win, win):
         w = df.iloc[i:i + win]
-        above = [c for c in samples if ks_2samp(samples[c], w[c].values).statistic > dcrit[c]]
-        run_above = run_above + [set(above)] if above else []
-        if len(run_above) >= k:
-            comuns = set.intersection(*run_above[-k:]) or set().union(*run_above[-k:])
+        above = set(c for c in samples if ks_2samp(samples[c], w[c].values).statistic > dcrit[c])
+        if n is None:   # drift_ref antigo: k janelas seguidas
+            run_above = run_above + [above] if above else []
+            recent = run_above[-k:] if len(run_above) >= k else []
+        else:           # k das últimas n janelas
+            run_above = (run_above + [above])[-n:]
+            recent = [r for r in run_above if r]
+            recent = recent if len(recent) >= k else []
+        if recent:
+            comuns = set.intersection(*recent) or set().union(*recent)
             fires.append((w.index[-1], sorted(comuns))); run_above = []
     return fires
 
