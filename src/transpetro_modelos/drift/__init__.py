@@ -7,6 +7,7 @@ investigação, bateria de validação e retreino com portões.
     report     relatório de investigação quando o monitor sai do verde
     battery    bateria de validação de um bundle (aprova/reprova)
     retrain    pipeline de retreino com portão humano e de dados
+    ciclo      simulação do ciclo detectar → quarentena → recalibrar → monitorar sobre uma série
 
 Política: docs/politica_retreino.md · arquitetura: docs/deteccao_drift.md
 """
