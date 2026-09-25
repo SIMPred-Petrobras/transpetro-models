@@ -1,1 +1,1 @@
-"""Detectores de concept drift (interface comum) e benchmark de atraso de detecção."""
+"""Caminho antigo, mantido por compatibilidade: use transpetro_modelos.drift."""

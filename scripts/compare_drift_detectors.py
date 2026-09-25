@@ -1,6 +1,6 @@
 """
 Compara os detectores da biblioteca (default_detectors) no benchmark de atraso de detecção
-(detector/drift_benchmark.py), sobre o ERRO DE RECONSTRUÇÃO do B-8802B, em dois cenários:
+(src/transpetro_modelos/drift/benchmark.py), sobre o ERRO DE RECONSTRUÇÃO do B-8802B, em dois cenários:
 
   controle : modelo de produção (treino 2025); referência = erros de jan–jun/2025;
              série = jul–dez/2025, período sem drift → todo disparo é falso alarme
@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DEP = ROOT / "deploy_v2/Transpetro"
 sys.path.insert(0, str(ROOT / "src")); sys.path.insert(0, str(DEP))
 import simpred_inference as si  # noqa: E402
-from transpetro_modelos.detector.drift_detectors import default_detectors  # noqa: E402
-from transpetro_modelos.detector.drift_benchmark import run_drift_benchmark  # noqa: E402
+from transpetro_modelos.drift.detectors import default_detectors  # noqa: E402
+from transpetro_modelos.drift.benchmark import run_drift_benchmark  # noqa: E402
 
 
 def main():

@@ -4,15 +4,29 @@ Junta as duas frentes de detecção de drift do projeto: a biblioteca de detecto
 interface comum (branch `Lara`) e o protocolo de monitoramento/retreino do B-8802B
 (`docs/politica_retreino.md`).
 
-## Peças
+## Onde fica cada coisa
 
-| peça | onde | papel |
+Tudo em `src/transpetro_modelos/drift/`; em `scripts/` ficam só os comandos, com os mesmos nomes de antes.
+
+| módulo | comando | papel |
 |---|---|---|
-| Interface e detectores | `src/transpetro_modelos/detector/drift_detectors.py` | `BaseDriftDetector` (`update`/`reset`, um ponto por vez) + KS por p-valor, PSI, Page–Hinkley, CUSUM, ADWIN-lite e **`CalibratedKSDetector`** |
-| Benchmark de atraso | `src/transpetro_modelos/detector/drift_benchmark.py` | mede atraso até detectar (amostras e tempo) e falsos alarmes antes de uma mudança conhecida |
-| Comparação no B-8802B | `scripts/compare_drift_detectors.py` | roda todos os detectores da fábrica no erro de reconstrução, controle sem drift × drift real |
-| Monitor de produção | `scripts/monitor_drift.py` (cópia em `deploy_v2/Transpetro/`) | semáforo semanal + M6; não depende da lib (roda no ambiente da integração) |
-| Relatório, bateria, retreino | `scripts/drift_report.py`, `battery.py`, `retrain_pipeline.py` | o que acontece depois da detecção |
+| `drift/detectors.py` | — | `BaseDriftDetector` (`update`/`reset`, um ponto por vez) + KS por p-valor, PSI, Page–Hinkley, CUSUM, ADWIN-lite e **`CalibratedKSDetector`** (o adotado) |
+| `drift/benchmark.py` | — | atraso até detectar e falsos alarmes contra uma mudança conhecida |
+| `drift/monitor.py` | `scripts/monitor_drift.py` | semáforo semanal (M1–M5) + M6 com o `CalibratedKSDetector`; `--make-drift-ref` calibra e grava o `drift_ref.json` no bundle |
+| `drift/report.py` | `scripts/drift_report.py` | relatório de investigação quando o monitor sai do verde |
+| `drift/battery.py` | `scripts/battery.py` | bateria de validação de um bundle (aprova/reprova) |
+| `drift/retrain.py` | `scripts/retrain_pipeline.py` | retreino com portão humano e de dados |
+| — | `scripts/compare_drift_detectors.py` | compara todos os detectores no B-8802B (controle × drift real) |
+| — | `scripts/package_monitor.py` | gera o monitor autocontido do pacote de deploy |
+
+**O monitor do deploy é gerado, não copiado.** `deploy_v2/Transpetro/monitor_drift.py` é montado por
+`scripts/package_monitor.py` a partir de `drift/monitor.py`, com o `CalibratedKSDetector` embutido,
+e não depende da lib (só pandas/numpy/scipy e o `simpred_inference.py` do pacote). O algoritmo existe
+em um lugar só. Depois de mudar o monitor ou o detector, rode o gerador;
+`python scripts/package_monitor.py --check` acusa se a cópia do deploy ficou desatualizada.
+
+`transpetro_modelos.detector` continua existindo só como atalho para o caminho antigo (o código da
+branch `Lara` importa de lá).
 
 ## O detector adotado: `CalibratedKSDetector`
 
