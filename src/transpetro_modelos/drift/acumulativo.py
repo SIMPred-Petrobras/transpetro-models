@@ -74,8 +74,9 @@ def erros_por_sensor(model, X: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(np.vstack(partes), index=X.index, columns=X.columns)
 
 
-def _treinar_etapa(pre: pd.DataFrame, preset: list, et: dict, pasta: Path, epochs: int):
+def _treinar_etapa(pre: pd.DataFrame, preset: list, et: dict, pasta: Path, epochs: int, semente: int | None = None):
     pasta.mkdir(parents=True, exist_ok=True)
+    semente = ARQUITETURA["semente"] if semente is None else semente
     treino = pre[(pre.index >= et["treino_ini"]) & (pre.index < et["treino_fim"])]
     n_val = int(len(treino) * 0.15)
     fit, va = treino.iloc[:-n_val], treino.iloc[-n_val:]
@@ -87,7 +88,7 @@ def _treinar_etapa(pre: pd.DataFrame, preset: list, et: dict, pasta: Path, epoch
         m.load_state_dict(torch.load(pasta / "model.pt", map_location="cpu"))
         art = pickle.load(open(pasta / "art.pkl", "rb"))
     else:
-        torch.manual_seed(a["semente"]); np.random.seed(a["semente"])
+        torch.manual_seed(semente); np.random.seed(semente)
         dl = lambda X, sh: DataLoader(TensorDataset(torch.tensor(X.values, dtype=torch.float32)), batch_size=256, shuffle=sh)
         m = train_vae(m, dl(Xtr, True), dl(Xva, False), epochs=epochs, learning_rate=a["lr"], weight_decay=1e-5, patience=10)
         torch.save(m.state_dict(), pasta / "model.pt"); pickle.dump(art, open(pasta / "art.pkl", "wb"))
@@ -161,6 +162,78 @@ def rodar(saida: str | Path, inicio: str = "2025-01-01", n_meses: int = 12, epoc
             f" | sintética {s100 if s100 is None else round(s100)} h / {s50 if s50 is None else round(s50)} h")
     res = pd.DataFrame(linhas)
     res.to_csv(saida / "etapas.csv", index=False)
+    return res
+
+
+def rodar_candidatos(saida: str | Path, sementes=(0, 1, 2), inicio: str = "2025-01-01", n_meses: int = 12,
+                     epochs: int = 60, data_fixa: str = "2026-06-10", fp_max_pct: float = 0.05, log=print,
+                     from_clearml: bool = False, reportar=None) -> pd.DataFrame:
+    """Como `rodar`, mas cada etapa treina um candidato por semente e escolhe um deles.
+
+    Escolha (só com dado disponível no momento do retreino): falso positivo na validação (último 15 % do
+    treino) ≤ `fp_max_pct` e, entre esses, a maior antecedência de uma falha sintética injetada no ÚLTIMO
+    MÊS DO TREINO. A avaliação usa datas diferentes: o mês em que o modelo operou e `data_fixa`.
+    O candidato escolhido grava `vivo.parquet` na pasta da etapa (lido por `serie_emendada`/`episodios`).
+    `reportar(etapa, linha, candidatos)` é chamado ao fim de cada etapa (ex.: para registrar no ClearML).
+    """
+    saida = Path(saida); saida.mkdir(parents=True, exist_ok=True)
+    cfg = EQUIPMENT_CONFIGS["B-8802B-2025"]
+    preset = get_preprocessing_steps("B-8802B-2025", "baseline")
+    raw = load_equipment_data("B-8802B-2025", from_clearml=from_clearml)
+    pre, _, _ = run_preprocessing(raw, cfg.pre_split_steps)
+    raw22 = load_equipment_data("B-8802B", from_clearml=from_clearml)
+    pre22, _, _ = run_preprocessing(raw22, cfg.pre_split_steps)
+    t_fixa = pd.Timestamp(data_fixa)
+    etapas_res, cands_res = [], []
+    for et in etapas(inicio, n_meses, pre.index.max()):
+        k = et["etapa"]
+        t_sel = _t0_sintetica(raw, et["treino_fim"] - pd.DateOffset(months=1), et["treino_fim"])
+        cands = []
+        for sem in sementes:
+            m, art, mu, sd, n_tr = _treinar_etapa(pre, preset, et, saida / f"etapa_{k:02d}" / f"s{sem}", epochs, semente=sem)
+            thr = mu + Y_ALARME * sd
+            X = run_preprocessing(pre, preset, fitted_artifacts=art, return_artifacts=True, return_report=True)[0]
+            e = _erros(m, X); fl = kofn(e > thr)
+            treino = fl[(fl.index >= et["treino_ini"]) & (fl.index < et["treino_fim"])]
+            fp_val = 100 * float(treino.iloc[-int(len(treino) * 0.15):].mean())
+            sel = _lead_sintetica(m, art, raw, cfg, preset, thr, t_sel, 1.0) if t_sel is not None else None
+            fixa = _lead_sintetica(m, art, raw, cfg, preset, thr, t_fixa, 1.0)
+            cands.append({"etapa": k, "semente": sem, "m": m, "art": art, "thr": thr, "X": X, "fl": fl, "e": e,
+                          "fp_val_pct": fp_val, "sintetica_escolha_h": sel, "sintetica_fixa_100_h": fixa, "n_treino": n_tr})
+        ordem = sorted(cands, key=lambda c: (c["fp_val_pct"] > fp_max_pct,
+                                              -(c["sintetica_escolha_h"] if c["sintetica_escolha_h"] is not None else -999),
+                                              c["fp_val_pct"]))
+        ch = ordem[0]
+        for c in cands:
+            cands_res.append({kk: c[kk] for kk in ("etapa", "semente", "fp_val_pct", "sintetica_escolha_h", "sintetica_fixa_100_h")}
+                             | {"escolhido": c is ch})
+        m, art, thr, fl, e, X = ch["m"], ch["art"], ch["thr"], ch["fl"], ch["e"], ch["X"]
+        vivo = (fl.index >= et["vivo_ini"]) & (fl.index < et["vivo_fim"])
+        pd.DataFrame({"erro": e[vivo], "limiar": thr, "alarme": fl[vivo]}).to_parquet(saida / f"etapa_{k:02d}" / "vivo.parquet")
+        erros_por_sensor(m, X[vivo]).to_parquet(saida / f"etapa_{k:02d}" / "vivo_sensores.parquet")
+        X22 = run_preprocessing(pre22, preset, fitted_artifacts=art, return_artifacts=True, return_report=True)[0]
+        f22 = kofn(_erros(m, X22) > thr)
+        rampa = f22[(f22.index >= RAMPA_2022) & (f22.index < FALHA_2022)]
+        lead22 = (FALHA_2022 - rampa[rampa].index.min()).total_seconds() / 86400 if rampa.any() else None
+        t0 = _t0_sintetica(raw, et["vivo_ini"], et["vivo_fim"])
+        s100 = _lead_sintetica(m, art, raw, cfg, preset, thr, t0, 1.0) if t0 is not None else None
+        s50 = _lead_sintetica(m, art, raw, cfg, preset, thr, t0, 0.5) if t0 is not None else None
+        f50 = _lead_sintetica(m, art, raw, cfg, preset, thr, t_fixa, 0.5)
+        linha = {"etapa": k, "meses_de_treino": k, "semente_escolhida": ch["semente"], "vivo_ini": et["vivo_ini"],
+                 "vivo_fim": et["vivo_fim"], "limiar": thr,
+                 "alarme_pct_vivo": 100 * float(fl[vivo].mean()) if vivo.any() else None,
+                 "normal_2022_pct": 100 * float(f22[f22.index < RAMPA_2022].mean()), "falha_2022_dias": lead22,
+                 "sintetica_100_h": s100, "sintetica_50_h": s50,
+                 "sintetica_fixa_100_h": ch["sintetica_fixa_100_h"], "sintetica_fixa_50_h": f50}
+        etapas_res.append(linha)
+        if reportar is not None:
+            reportar(k, linha, [c for c in cands_res if c["etapa"] == k])
+        log(f"[etapa {k:2d}] escolhida semente {ch['semente']} | alarme {linha['alarme_pct_vivo']:.3f} % | falha 2022 "
+            f"{lead22 if lead22 is None else round(lead22, 2)} d | sintética no mês {s100 if s100 is None else round(s100)} h"
+            f" | data fixa {ch['sintetica_fixa_100_h'] if ch['sintetica_fixa_100_h'] is None else round(ch['sintetica_fixa_100_h'])} h"
+            f" | candidatos na data fixa: {[None if c['sintetica_fixa_100_h'] is None else round(c['sintetica_fixa_100_h']) for c in cands]}")
+    res = pd.DataFrame(etapas_res); res.to_csv(saida / "etapas.csv", index=False)
+    pd.DataFrame(cands_res).to_csv(saida / "candidatos.csv", index=False)
     return res
 
 
