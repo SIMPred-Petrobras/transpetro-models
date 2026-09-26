@@ -8,6 +8,7 @@ investigação, bateria de validação e retreino com portões.
     battery    bateria de validação de um bundle (aprova/reprova)
     retrain    pipeline de retreino com portão humano e de dados
     ciclo      simulação do ciclo detectar → quarentena → recalibrar → monitorar sobre uma série
+    acumulativo retreino acumulativo do modelo após uma mudança (provisório que amadurece)
 
 Política: docs/politica_retreino.md · arquitetura: docs/deteccao_drift.md
 """
