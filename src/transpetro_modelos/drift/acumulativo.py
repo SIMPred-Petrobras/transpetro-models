@@ -237,6 +237,61 @@ def rodar_candidatos(saida: str | Path, sementes=(0, 1, 2), inicio: str = "2025-
     return res
 
 
+def _ajusta_data(raw: pd.DataFrame, t0: pd.Timestamp, horas: int = 72) -> pd.Timestamp | None:
+    """t0, ou 7/14 dias depois, com a bomba operando ≥ 80 % do tempo na janela da injeção."""
+    for extra in (0, 7, 14):
+        t = t0 + pd.Timedelta(days=extra)
+        w = raw.loc[t: t + pd.Timedelta(hours=horas), "Pressão Descarga"]
+        if len(w) and (w > 35).mean() >= 0.8:
+            return t
+    return None
+
+
+def sintetica_varias_datas(saida: str | Path, datas: list[str], sementes=(0, 1, 2), n_meses: int = 12,
+                           from_clearml: bool = False, log=print) -> pd.DataFrame:
+    """Reavalia os candidatos já treinados (cache em `saida/etapa_XX/sN/`) com a falha sintética
+    injetada em várias datas. Não treina nada. Para cada data registra também o nível da temperatura
+    do mancal LA na janela, para relacionar a antecedência com a deriva de temperatura de 2026."""
+    saida = Path(saida)
+    cfg = EQUIPMENT_CONFIGS["B-8802B-2025"]
+    preset = get_preprocessing_steps("B-8802B-2025", "baseline")
+    raw = load_equipment_data("B-8802B-2025", from_clearml=from_clearml)
+    pre, _, _ = run_preprocessing(raw, cfg.pre_split_steps)
+    op25 = raw.loc["2025"]; op25 = op25[op25["Pressão Descarga"] > 35]
+    temp_ref = float(op25["Temperatura Bomba LA"].median())
+    escolhidos = {}
+    if (saida / "candidatos.csv").exists():
+        c = pd.read_csv(saida / "candidatos.csv")
+        escolhidos = {(int(r.etapa), int(r.semente)): bool(r.escolhido) for r in c.itertuples()}
+    janelas = []
+    for d in datas:
+        t0 = _ajusta_data(raw, pd.Timestamp(d))
+        if t0 is None:
+            log(f"[aviso] {d}: bomba parada na janela e nas semanas seguintes — data descartada"); continue
+        w = raw.loc[t0: t0 + pd.Timedelta(hours=72)]; w = w[w["Pressão Descarga"] > 35]
+        janelas.append((d, t0, float(w["Temperatura Bomba LA"].median())))
+        log(f"data {d} → injeção em {t0:%d/%m/%Y} | Temp. mancal LA mediana {janelas[-1][2]:.1f} °C (2025: {temp_ref:.1f} °C)")
+    linhas = []
+    for et in etapas("2025-01-01", n_meses, pre.index.max()):
+        k = et["etapa"]
+        for sem in sementes:
+            pasta = saida / f"etapa_{k:02d}" / f"s{sem}"
+            if not (pasta / "model.pt").exists():
+                continue
+            m, art, mu, sd, _ = _treinar_etapa(pre, preset, et, pasta, epochs=60, semente=sem)
+            thr = mu + Y_ALARME * sd
+            for d, t0, temp in janelas:
+                linhas.append({"etapa": k, "semente": sem, "escolhido": escolhidos.get((k, sem)), "data": d,
+                               "injecao_em": t0, "temp_LA_mediana": temp, "temp_LA_2025": temp_ref,
+                               "sintetica_100_h": _lead_sintetica(m, art, raw, cfg, preset, thr, t0, 1.0),
+                               "sintetica_50_h": _lead_sintetica(m, art, raw, cfg, preset, thr, t0, 0.5)})
+        feito = [l for l in linhas if l["etapa"] == k]
+        log(f"[etapa {k:2d}] " + " | ".join(
+            f"{d}: " + ",".join("-" if l["sintetica_100_h"] is None else f"{l['sintetica_100_h']:.0f}"
+                                for l in feito if l["data"] == d) for d, _, _ in janelas))
+    return pd.DataFrame(linhas)
+
+
 def sintetica_data_fixa(saida: str | Path, t0: str = "2026-06-10", n_meses: int = 12) -> pd.DataFrame:
     """Falha sintética injetada na MESMA data para todas as etapas: separa o efeito do modelo
     (quantos meses de treino) do efeito do mês em que a falha foi injetada."""
