@@ -281,8 +281,11 @@ def sintetica_varias_datas(saida: str | Path, datas: list[str], sementes=(0, 1, 
             m, art, mu, sd, _ = _treinar_etapa(pre, preset, et, pasta, epochs=60, semente=sem)
             thr = mu + Y_ALARME * sd
             for d, t0, temp in janelas:
+                # escala 0 = série original: se já há alarme na janela, a medida da sintética não vale
+                sem_falha = _lead_sintetica(m, art, raw, cfg, preset, thr, t0, 0.0)
                 linhas.append({"etapa": k, "semente": sem, "escolhido": escolhidos.get((k, sem)), "data": d,
                                "injecao_em": t0, "temp_LA_mediana": temp, "temp_LA_2025": temp_ref,
+                               "alarma_sem_falha": sem_falha is not None,
                                "sintetica_100_h": _lead_sintetica(m, art, raw, cfg, preset, thr, t0, 1.0),
                                "sintetica_50_h": _lead_sintetica(m, art, raw, cfg, preset, thr, t0, 0.5)})
         feito = [l for l in linhas if l["etapa"] == k]

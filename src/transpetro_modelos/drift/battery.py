@@ -95,6 +95,11 @@ def run_battery(equipment: str, bundle: Path | None = None, data_new: Path | Non
 
     sy = cfg["synthetic"]; t0 = pd.Timestamp(sy["t0"]); tf = t0 + pd.Timedelta(hours=sy["ramp_h"])
     out["synthetic"] = {}
+    base = fl[(fl.index >= t0) & (fl.index <= tf + pd.Timedelta(hours=sy["hold_h"]))]
+    out["synthetic"]["janela_contaminada"] = bool(base.any())
+    if base.any():   # o modelo já alarma aqui sem falha: um "alarme antecipado" não mediria detecção
+        P(f"[4] AVISO: o bundle já alarma na janela da falha sintética SEM injeção ({base[base].index.min()}); "
+          f"a antecedência medida nessa data não vale como detecção — escolha outra data")
     for s in (1.0, 0.5):
         rI = score(bundle, inject(raw, sy["signature"], t0, sy["ramp_h"], sy["hold_h"], s))
         w = rI.loc[t0: tf + pd.Timedelta(hours=sy["hold_h"]), "is_anomaly"]
@@ -111,7 +116,8 @@ def run_battery(equipment: str, bundle: Path | None = None, data_new: Path | Non
         f"cross-era ≥ {ce['min_lead_days']} d e normal ≤ {ce['max_normal_rate_pct']}%":
             out["cross_era"]["lead_days"] is not None and out["cross_era"]["lead_days"] >= ce["min_lead_days"]
             and out["cross_era"]["normal_rate_pct"] <= ce["max_normal_rate_pct"],
-        f"sintética 100% ≥ {sy['min_lead_h_100']} h": out["synthetic"]["100"] is not None and out["synthetic"]["100"] >= sy["min_lead_h_100"],
+        f"sintética 100% ≥ {sy['min_lead_h_100']} h": not out["synthetic"]["janela_contaminada"]
+            and out["synthetic"]["100"] is not None and out["synthetic"]["100"] >= sy["min_lead_h_100"],
         "sintética 50% detectada": (out["synthetic"]["50"] is not None) or not sy["require_50_detected"],
     }
     out["checks"] = checks; out["approved"] = all(checks.values())
