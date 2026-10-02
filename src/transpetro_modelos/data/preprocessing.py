@@ -291,22 +291,6 @@ def ffill(df: pd.DataFrame, limit: int = 4) -> pd.DataFrame:
     """
     return df.ffill(limit=limit).dropna()
 
-
-def moving_average(
-    df: pd.DataFrame,
-    window: int = 3,
-    min_periods: int = 1,
-    columns: list[str] | None = None,
-) -> pd.DataFrame:
-    """Apply a causal rolling mean to selected columns."""
-    if columns is None:
-        columns = list(df.columns)
-
-    df = df.copy()
-    df[columns] = df[columns].rolling(window=window, min_periods=min_periods, center=False).mean()
-    return df
-
-
 def knn_impute(
     df: pd.DataFrame,
     imputer: KNNImputer | None = None,
@@ -375,6 +359,10 @@ def run_preprocessing(
             df, artifacts.scaler = normalize(df, scaler=artifacts.scaler, **params)
         elif step == "clip":
             df, artifacts.clip_bounds = clip(df, bounds=artifacts.clip_bounds, **params)
+        elif step == "remove_regime_transients":
+            df = remove_regime_transients(df, **params)
+        elif step == "add_rolling_features":
+            df = add_rolling_features(df, **params)
         elif step == "select_features":
             df = select_features(df, **params)
         elif step == "resample":
