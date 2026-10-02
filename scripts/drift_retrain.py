@@ -2,8 +2,8 @@
 drift_triggered_retrain.py
 ==================================
 Walk-forward disparado por DRIFT (não por calendário fixo), testando VÁRIAS
-técnicas de detecção de concept drift (as de drift_detectors.py: KS, PSI,
-Page-Hinkley, CUSUM, ADWIN-lite) sobre o mesmo período de dados.
+técnicas de detecção de concept drift (as de drift_detectors.py: KS, KS
+calibrado, PSI, Page-Hinkley, CUSUM, ADWIN-lite) sobre o mesmo período de dados.
 
 Para cada técnica:
     1. treina um baseline inicial
@@ -14,6 +14,12 @@ Para cada técnica:
        disparado por evento em vez de por mês fixo)
     4. recalibra o detector com os erros do novo baseline e continua
 
+Antes de retreinar, cada drift confirmado é classificado (mesma regra do
+drift_report.py): tendência monotônica CRESCENTE em vibração/temperatura =
+possível degradação → o retreino é BLOQUEADO (retreinar absorveria a falha como
+"novo normal") e o alarme segue ativo; sem essa tendência = mudança de
+regime/conceito → retreina.
+
 No final, cada técnica é pontuada com as MESMAS funções que o resto do
 automl_anomaly_v3.py usa (compute_balanced_score_multi_failure /
 compute_balanced_score) — assim os resultados ficam comparáveis lado a lado
@@ -22,10 +28,12 @@ com os trials estáticos da busca principal.
 Saída, por técnica:
     - retrain_log_<detector>.csv   : um retreino por linha
     - full_scores_<detector>.parquet
+    - drift_events_<detector>.csv  : um drift confirmado por linha, com o diagnóstico
+                                     degradação física × mudança de regime e a decisão
     - timeline_<detector>.png      : série + linhas verticais nos retreinos
 Saída consolidada:
-    - resumo_tecnicas.csv          : comparação entre as 6 técnicas
-    - timeline_comparativa.png     : as 6 técnicas empilhadas, mesmo eixo X
+    - resumo_tecnicas.csv          : comparação entre as 7 técnicas
+    - timeline_comparativa.png     : as 7 técnicas empilhadas, mesmo eixo X
 
 Uso:
     python scripts/drift_triggered_retrain.py \
@@ -53,10 +61,110 @@ from transpetro_modelos.data.loading import load_equipment_data
 from transpetro_modelos.data.preprocessing import run_preprocessing
 from transpetro_modelos.training.evaluate import compute_balanced_score, apply_debounce
 from transpetro_modelos.training.evaluate_multi_failure import compute_balanced_score_multi_failure
-from transpetro_modelos.detector.drift_detectors import default_detectors
+from transpetro_modelos.detector.drift_detectors import build_detector, DETECTOR_NAMES
 
 # reaproveita a lógica de treino/score já existente, sem duplicar
 from automl import train_model, score_full, get_true_drift_times
+
+# Piso da idade mínima de uma era (dias): o aquecimento do detector sozinho dá
+# só 1-3 dias, o que deixa o retreino disparar com qualquer oscilação.
+DEFAULT_MIN_ERA_DAYS = 30
+
+
+def _kofn(flags: pd.Series, k: int, n: int) -> pd.Series:
+    """Persistência k-de-n: só é anomalia se >= k dos últimos n pontos passaram do limiar."""
+    return (flags.astype(int).rolling(n, min_periods=n).sum() >= k).astype(bool)
+
+
+# ════════════════════════════════════════════════════════════════
+# Degradação física × mudança de regime (mesma lógica do drift_report.py)
+# ════════════════════════════════════════════════════════════════
+
+DEG_PADROES_DEFAULT = ("B-4064A: Vib Mancal Bomba LNA", "B-4064A: Temperatura Mancal Motor LNA")   # sensores físicos onde uma tendência = desgaste
+REGIME_COL_DEFAULT = "B-4064A: Corrente"          # variável operacional que define o regime
+
+
+def sensores_degradacao(colunas, padroes) -> list[str]:
+    return [c for c in colunas if any(p.lower() in str(c).lower() for p in padroes)]
+
+
+def diagnosticar_drift(
+    df_pre: pd.DataFrame,
+    hist: pd.DataFrame,
+    t_fim: pd.Timestamp,
+    artifacts=None,
+    padroes=DEG_PADROES_DEFAULT,
+    regime_col: str = REGIME_COL_DEFAULT,
+    janela_dias: int = 30,
+    slope_rel_min: float = 1.0,
+) -> dict[str, Any]:
+    """
+    Quando um detector dispara, decide se o desvio parece DEGRADAÇÃO FÍSICA ou
+    MUDANÇA DE REGIME/CONCEITO. Mesma regra do drift_report.py:
+
+      - tendência monotônica CRESCENTE em vibração/temperatura (mediana diária
+        dos últimos `janela_dias` dias, Theil-Sen)   → "possivel_degradacao"
+      - caso contrário                                → "drift_provavel"
+
+    Informativos (não mudam a conclusão): correlação diária erro × variável de
+    regime, % de tempo fora da faixa de clip do treino (M5) e nº de episódios de
+    anomalia nos últimos 60 dias (intermitente = padrão de drift).
+
+    A tendência é monotônica se a variação total estimada na janela
+    (slope x dias) é >= `slope_rel_min` desvios-padrão diários do sensor E a
+    fração de dias subindo é > 65% (ou < 35%). É relativa (não em unidade
+    física) para funcionar em qualquer sensor; o drift_report.py usa 0,05
+    unidade/dia fixo.
+    """
+    from scipy.stats import theilslopes
+
+    raw = df_pre.loc[:t_fim]
+    dia = raw.resample("D").median().dropna(how="all")
+
+    tend: dict[str, dict] = {}
+    for c in sensores_degradacao(dia.columns, padroes):
+        serie = dia[c].dropna()
+        y = serie.tail(janela_dias)
+        if len(y) < 15:
+            continue
+        slope = float(theilslopes(y.values, np.arange(len(y)))[0])
+        std_ref = float(serie.std()) or 1e-9
+        subindo = float((y.diff().dropna() > 0).mean())
+        var_rel = slope * len(y) / std_ref
+        monot = abs(var_rel) >= slope_rel_min and (subindo > 0.65 or subindo < 0.35)
+        tend[c] = {"slope_dia": slope, "variacao_rel": var_rel,
+                   "consistencia": subindo, "monotonica": bool(monot)}
+    subindo_fisico = sorted(c for c, v in tend.items() if v["monotonica"] and v["slope_dia"] > 0)
+
+    corr = np.nan
+    if regime_col in dia.columns:
+        err_d = hist["reconstruction_error"].resample("D").median()
+        j = pd.concat([err_d, dia[regime_col]], axis=1, join="inner").dropna()
+        if len(j) >= 10:
+            corr = float(j.iloc[:, 0].corr(j.iloc[:, 1]))
+
+    fora_clip = np.nan
+    cb = getattr(artifacts, "clip_bounds", None)
+    if cb:
+        ult = raw[raw.index >= t_fim - pd.Timedelta(days=28)]
+        fr = [100 * float(((ult[c] < lo) | (ult[c] > hi)).mean())
+              for c, (lo, hi) in cb.items() if c in ult.columns]
+        fora_clip = max(fr) if fr else np.nan
+
+    al = hist.index[hist["is_anomaly"].to_numpy(dtype=bool)]
+    al = al[al >= t_fim - pd.Timedelta(days=60)]
+    n_ep = 0 if len(al) == 0 else 1 + int((pd.Series(al).diff() > pd.Timedelta(hours=12)).sum())
+
+    return {
+        "conclusao": "possivel_degradacao" if subindo_fisico else "drift_provavel",
+        "sensores_subindo": ", ".join(subindo_fisico),
+        "n_sensores_avaliados": len(tend),
+        "corr_erro_regime": corr,
+        "acompanha_regime": bool(abs(corr) > 0.3) if corr == corr else False,
+        "fora_clip_pct": fora_clip,
+        "n_episodios_60d": n_ep,
+        "tendencias": tend,
+    }
 
 
 # ════════════════════════════════════════════════════════════════
@@ -156,8 +264,10 @@ def auto_min_era_days(detector_name: str, detector_obj, df_pre: pd.DataFrame) ->
     Deriva a idade mínima de uma era a partir do requisito estatístico
     PRÓPRIO de cada detector (não é um chute): detectores baseados em janela
     (KS/PSI) não têm sinal confiável antes do buffer encher; ADWIN precisa de
-    2x sua sub-janela mínima. Converte esse nº de amostras pra dias usando a
-    taxa de amostragem REAL medida nos dados (não assumida).
+    2x sua sub-janela mínima; o KS calibrado precisa de `k_consecutive`
+    janelas acima do limiar para disparar (window_size x k_consecutive).
+    Converte esse nº de amostras pra dias usando a taxa de amostragem REAL
+    medida nos dados (não assumida).
     """
     warmup_amostras = getattr(detector_obj, "window_size", None)
     if warmup_amostras is None:
@@ -169,6 +279,11 @@ def auto_min_era_days(detector_name: str, detector_obj, df_pre: pd.DataFrame) ->
             # exigência de tamanho mínimo de treino que o resto do pipeline já
             # usa (50 amostras) — consistente, não arbitrário.
             warmup_amostras = 50
+    else:
+        # KS calibrado: o disparo exige k janelas acima do limiar (persistência)
+        k = getattr(detector_obj, "k_consecutive", None)
+        if k is not None:
+            warmup_amostras *= k
 
     step_s = df_pre.index.to_series().diff().dt.total_seconds().median() or 86400.0
     dias = max(1, int(np.ceil(warmup_amostras * step_s / 86400.0)))
@@ -194,10 +309,20 @@ def drift_triggered_walkforward(
     chunk_days: int = 7,
     preset: str = "baseline",
     model_kwargs: dict[str, Any] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    alarm_sigma: float = 6.5,
+    persist_k: int = 15,
+    persist_n: int = 20,
+    confirm_chunks: int = 2,
+    min_train_days: int = 90,
+    deg_patterns=DEG_PADROES_DEFAULT,
+    regime_col: str = REGIME_COL_DEFAULT,
+    deg_window_days: int = 30,
+    deg_slope_rel: float = 1.0,
+    bloquear_degradacao: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Executa o walk-forward disparado por drift sobre TODO o df_pre, usando o
-    detector `detector_name` (uma chave de default_detectors()).
+    detector `detector_name` (uma chave de DETECTOR_NAMES).
 
     `min_era_days=None` (default) deriva o valor automaticamente a partir do
     requisito estatístico do próprio detector (auto_min_era_days) — não
@@ -206,6 +331,9 @@ def drift_triggered_walkforward(
     Retorna:
         full_scores : DataFrame (reconstruction_error, is_anomaly, era) por timestamp
         retrain_log : DataFrame com um retreino por linha
+        drift_events: DataFrame com UMA LINHA POR DRIFT CONFIRMADO (passou no portão),
+                      com o diagnóstico degradação × regime e a decisão tomada
+                      ("retreinou" ou "retreino_bloqueado_degradacao")
     """
     model_kwargs = model_kwargs or {}
     steps = get_preprocessing_steps(equipment_id, preset=preset)
@@ -214,7 +342,20 @@ def drift_triggered_walkforward(
     fim = df_pre.index.max()
     era_id = 0
     retrain_log: list[dict] = []
+    drift_events: list[dict] = []
     full_scores_parts: list[pd.DataFrame] = []
+
+    sens_deg = sensores_degradacao(df_pre.columns, deg_patterns)
+    if not sens_deg:
+        print(f"  [{detector_name}] [aviso] nenhuma coluna casa com {list(deg_patterns)}: "
+              f"sem sensor físico, todo drift será tratado como 'drift_provavel' (nunca bloqueia).")
+    if regime_col not in df_pre.columns:
+        print(f"  [{detector_name}] [aviso] coluna de regime '{regime_col}' não existe em df_pre "
+              f"(a correlação erro × regime ficará vazia).")
+
+    # taxa de amostragem real (amostras/dia): define a janela de 1 dia do KS calibrado
+    step_s = df_pre.index.to_series().diff().dt.total_seconds().median() or 300.0
+    samples_per_day = max(2, int(round(86400.0 / step_s)))
 
     def _erro_bruto(model, df):
         _, _, train_errors = score_full(
@@ -244,9 +385,22 @@ def drift_triggered_walkforward(
                 f"de treino após separar val interna."
             )
         model, _ = train_model(model_type, train_df_fit, val_df, device, **model_kwargs)
-        train_errors_full = _erro_bruto(model, train_df)
-        threshold = float(np.percentile(train_errors_full, threshold_percentile))
-        return model, artifacts, train_errors_full, threshold
+        # Calibra em dado que o modelo não usou para ajustar pesos (os 20% finais).
+        # Erro in-sample é sistematicamente menor que em dado novo: limiar e
+        # referência do detector saíam apertados demais.
+        val_errors = _erro_bruto(model, val_df)
+        if len(val_errors) >= 2 * samples_per_day:
+            ref_errors = val_errors
+        else:
+            print(f"  [{detector_name} | {contexto}] [aviso] validação com só {len(val_errors)} "
+                  f"amostras (< {2 * samples_per_day}); calibrando com o erro do treino (in-sample).")
+            ref_errors = _erro_bruto(model, train_df)
+
+        if alarm_sigma > 0:
+            threshold = float(ref_errors.mean() + alarm_sigma * ref_errors.std())
+        else:
+            threshold = float(np.percentile(ref_errors, threshold_percentile))
+        return model, artifacts, ref_errors, threshold
 
     corte_inicial = inicio + pd.Timedelta(days=initial_train_days)
     train_slice = df_pre.loc[inicio:corte_inicial]
@@ -257,10 +411,14 @@ def drift_triggered_walkforward(
         )
 
     model, artifacts, train_errors, threshold = _treinar_era(train_slice, "baseline_inicial")
-    detector = default_detectors(reference=train_errors)[detector_name]
+    # constrói SÓ o detector escolhido (o KS calibrado exige >= 2 janelas de
+    # referência e não deve derrubar os demais detectores)
+    detector = build_detector(detector_name, train_errors, samples_per_day)
 
     if min_era_days is None:
-        min_era_days = auto_min_era_days(detector_name, detector, df_pre)
+        min_era_days = max(auto_min_era_days(detector_name, detector, df_pre), DEFAULT_MIN_ERA_DAYS)
+        print(f"[auto] {detector_name}: idade mínima de era = {min_era_days} dia(s) "
+              f"(piso de {DEFAULT_MIN_ERA_DAYS})")
 
     retrain_log.append({
         "detector": detector_name, "era": era_id, "era_start": inicio, "retrain_at": inicio,
@@ -269,6 +427,7 @@ def drift_triggered_walkforward(
 
     cursor = corte_inicial
     era_start = corte_inicial
+    chunks_com_drift = 0   # chunks consecutivos em que o detector disparou
 
     while cursor < fim:
         prox = min(cursor + pd.Timedelta(days=chunk_days), fim)
@@ -293,9 +452,10 @@ def drift_triggered_walkforward(
             continue
 
         erros = _erro_bruto(model, pedaco_df)
-        is_anomaly = erros > threshold
+        # excedência bruta (ponto a ponto); a persistência k-de-n é aplicada no fim,
+        # sobre a série inteira, para atravessar as fronteiras de chunk e de era
         full_scores_parts.append(pd.DataFrame({
-            "reconstruction_error": erros, "is_anomaly": is_anomaly, "era": era_id,
+            "reconstruction_error": erros, "exceeds": erros > threshold, "era": era_id,
         }, index=pedaco_df.index))
 
         drift_disparou = False
@@ -304,29 +464,61 @@ def drift_triggered_walkforward(
                 drift_disparou = True
                 break
 
+        # Portão de retreino: o drift precisa (a) persistir por `confirm_chunks`
+        # chunks seguidos e (b) a era precisa ter idade mínima. Se o detector
+        # disparou mas o portão não abriu, reseta e deixa reacumular: só dispara
+        # de novo no chunk seguinte se o drift continuar.
+        chunks_com_drift = chunks_com_drift + 1 if drift_disparou else 0
         idade_era_dias = (prox - era_start).days
-        if drift_disparou and idade_era_dias >= min_era_days:
-            era_id += 1
-            nova_train_slice = df_pre.loc[era_start:prox]
-            model, artifacts, train_errors, threshold = _treinar_era(
-                nova_train_slice, f"retreino_era_{era_id}_em_{prox.date()}"
-            )
-            detector = default_detectors(reference=train_errors)[detector_name]
-            retrain_log.append({
-                "detector": detector_name, "era": era_id, "era_start": era_start,
-                "retrain_at": prox, "motivo": f"drift_{detector_name}",
-                "n_amostras_treino": len(nova_train_slice), "threshold": threshold,
-            })
-            era_start = prox
+        if drift_disparou and chunks_com_drift >= confirm_chunks and idade_era_dias >= min_era_days:
+            # drift confirmado: antes de retreinar, separa degradação física de mudança de regime
+            hist = pd.concat(full_scores_parts).sort_index()
+            hist["is_anomaly"] = _kofn(hist["exceeds"], persist_k, persist_n)
+            diag = diagnosticar_drift(df_pre, hist, prox, artifacts, deg_patterns,
+                                      regime_col, deg_window_days, deg_slope_rel)
+            bloquear = bloquear_degradacao and diag["conclusao"] == "possivel_degradacao"
+            evento = {"detector": detector_name, "data": prox, "era": era_id,
+                      "idade_era_dias": idade_era_dias,
+                      **{k: v for k, v in diag.items() if k != "tendencias"},
+                      "decisao": "retreino_bloqueado_degradacao" if bloquear else "retreinou"}
+            drift_events.append(evento)
+
+            if bloquear:
+                print(f"  [{detector_name}] {prox.date()}: drift com tendência crescente em "
+                      f"{diag['sensores_subindo']} → POSSÍVEL DEGRADAÇÃO, retreino bloqueado "
+                      f"(alarme mantido; avisar a operação).")
+                detector.reset()
+                chunks_com_drift = 0
+            else:
+                era_id += 1
+                # janela mínima de treino: não treina com uma era curtinha demais
+                inicio_treino = max(inicio, min(era_start, prox - pd.Timedelta(days=min_train_days)))
+                nova_train_slice = df_pre.loc[inicio_treino:prox]
+                model, artifacts, train_errors, threshold = _treinar_era(
+                    nova_train_slice, f"retreino_era_{era_id}_em_{prox.date()}"
+                )
+                detector = build_detector(detector_name, train_errors, samples_per_day)
+                retrain_log.append({
+                    "detector": detector_name, "era": era_id, "era_start": era_start,
+                    "train_start": inicio_treino,
+                    "retrain_at": prox, "motivo": f"drift_{detector_name}",
+                    "n_amostras_treino": len(nova_train_slice), "threshold": threshold,
+                })
+                era_start = prox
+                chunks_com_drift = 0
         elif drift_disparou:
             detector.reset()
 
         cursor = prox
 
-    full_scores = pd.concat(full_scores_parts).sort_index() if full_scores_parts else pd.DataFrame(
-        columns=["reconstruction_error", "is_anomaly", "era"]
-    )
-    return full_scores, pd.DataFrame(retrain_log)
+    if full_scores_parts:
+        full_scores = pd.concat(full_scores_parts).sort_index()
+        full_scores["is_anomaly"] = _kofn(full_scores["exceeds"], persist_k, persist_n)
+    else:
+        full_scores = pd.DataFrame(
+            columns=["reconstruction_error", "exceeds", "is_anomaly", "era"]
+        )
+    return full_scores, pd.DataFrame(retrain_log), pd.DataFrame(drift_events)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -372,6 +564,7 @@ def plotar_timeline(
     failure_events: list | None = None,
     title: str = "",
     ax=None,
+    eventos: pd.DataFrame | None = None,
 ) -> None:
     standalone = ax is None
     if standalone:
@@ -399,6 +592,12 @@ def plotar_timeline(
     for i, (_, row) in enumerate(retreinos_reais.iterrows()):
         ax.axvline(row["retrain_at"], color="red", linestyle="--", linewidth=1.3,
                   label="Drift detectado → retreino" if i == 0 else None)
+
+    if eventos is not None and len(eventos):
+        bloq = eventos[eventos["decisao"] == "retreino_bloqueado_degradacao"]
+        for i, (_, row) in enumerate(bloq.iterrows()):
+            ax.axvline(pd.Timestamp(row["data"]), color="darkorange", linestyle="-.", linewidth=1.5,
+                      label="Possível degradação (retreino bloqueado)" if i == 0 else None)
 
     if failure_events:
         for i, evento in enumerate(failure_events):
@@ -461,15 +660,38 @@ def main():
                              "disponíveis pro equipamento, via config.preprocess_presets)")
     parser.add_argument("--threshold-percentile", type=float, default=99.0)
     parser.add_argument("--detectors", nargs="+", default=None,
-                        choices=["ks_test", "ks_test_w100", "psi", "page_hinkley", "cusum", "adwin_lite"],
-                        help="Quais técnicas de drift testar (default: todas as 6)")
+                        choices=DETECTOR_NAMES,
+                        help="Quais técnicas de drift testar (default: todas as 7)")
     parser.add_argument("--initial-train-days", type=int, default=None,
                         help="Dias pro baseline inicial. Default: descoberto automaticamente "
                              "por preset (curva de aprendizado, independente do modelo).")
     parser.add_argument("--min-era-days", type=int, default=None,
                         help="Idade mínima de uma era antes de aceitar retreino. Default: "
-                             "derivado automaticamente do requisito estatístico de cada detector.")
+                             f"máx(aquecimento do detector, {DEFAULT_MIN_ERA_DAYS} dias).")
     parser.add_argument("--chunk-days", type=int, default=7)
+    parser.add_argument("--alarm-sigma", type=float, default=6.5,
+                        help="Limiar de anomalia = média + N*desvio do erro de validação "
+                             "(igual à régua de produção). 0 = usa --threshold-percentile.")
+    parser.add_argument("--persist-k", type=int, default=15,
+                        help="Persistência: anomalia só se >= K dos últimos N pontos passaram do limiar.")
+    parser.add_argument("--persist-n", type=int, default=20)
+    parser.add_argument("--confirm-chunks", type=int, default=2,
+                        help="Chunks consecutivos com drift exigidos antes de retreinar.")
+    parser.add_argument("--min-train-days", type=int, default=90,
+                        help="Janela mínima (dias) de treino em cada retreino, mesmo com era curta.")
+    parser.add_argument("--deg-patterns", nargs="+", default=list(DEG_PADROES_DEFAULT),
+                        help="Trechos dos nomes de coluna dos sensores físicos onde uma tendência "
+                             "crescente indica degradação (default: Vibra Temperatura).")
+    parser.add_argument("--regime-col", default=REGIME_COL_DEFAULT,
+                        help="Coluna de regime operacional p/ correlação com o erro (default: Pressão Descarga).")
+    parser.add_argument("--deg-window-days", type=int, default=30,
+                        help="Janela (dias) da tendência monotônica (mediana diária, Theil-Sen).")
+    parser.add_argument("--deg-slope-rel", type=float, default=1.0,
+                        help="Variação mínima na janela, em desvios-padrão diários do sensor, "
+                             "para a tendência contar como monotônica.")
+    parser.add_argument("--permitir-retreino-em-degradacao", action="store_true",
+                        help="Só registra o diagnóstico; NÃO bloqueia o retreino quando há "
+                             "possível degradação (útil para comparar com/sem o bloqueio).")
     parser.add_argument("--prefailure-days", type=int, default=30)
     parser.add_argument("--normal-end-days", type=int, default=60)
     parser.add_argument("--output-dir", default="drift_retrain_out")
@@ -526,7 +748,7 @@ def main():
         if getattr(config, "preprocess_presets", None) else ["baseline"]
     )
     preset_names = args.presets or available_presets
-    detector_names = args.detectors or list(default_detectors(reference=np.array([0.0, 1.0])).keys())
+    detector_names = args.detectors or list(DETECTOR_NAMES)
 
     total_combos = len(model_names) * len(preset_names) * len(detector_names)
     print(f"\nGrade: {len(model_names)} modelo(s) x {len(preset_names)} preset(s) x "
@@ -568,12 +790,19 @@ def main():
             for nome_detector in detector_names:
                 print(f"{'=' * 70}\n{model_name} | {preset_name} | {nome_detector}\n{'=' * 70}")
                 try:
-                    full_scores, retrain_log = drift_triggered_walkforward(
+                    full_scores, retrain_log, drift_events = drift_triggered_walkforward(
                         df_pre, args.equipment, model_name, args.threshold_percentile,
                         nome_detector, device,
                         initial_train_days=janela_inicial_por_preset[preset_name],
                         min_era_days=args.min_era_days,
                         chunk_days=args.chunk_days, preset=preset_name,
+                        alarm_sigma=args.alarm_sigma,
+                        persist_k=args.persist_k, persist_n=args.persist_n,
+                        confirm_chunks=args.confirm_chunks,
+                        min_train_days=args.min_train_days,
+                        deg_patterns=args.deg_patterns, regime_col=args.regime_col,
+                        deg_window_days=args.deg_window_days, deg_slope_rel=args.deg_slope_rel,
+                        bloquear_degradacao=not args.permitir_retreino_em_degradacao,
                     )
                 except Exception as exc:
                     print(f"  [ERRO] {model_name}|{preset_name}|{nome_detector} falhou: "
@@ -583,11 +812,13 @@ def main():
 
                 prefixo = f"{model_name}_{preset_name}_{nome_detector}"
                 retrain_log.to_csv(output_dir / f"retrain_log_{prefixo}.csv", index=False)
+                drift_events.to_csv(output_dir / f"drift_events_{prefixo}.csv", index=False)
                 full_scores.to_parquet(output_dir / f"full_scores_{prefixo}.parquet")
                 plotar_timeline(
                     full_scores, retrain_log, output_dir / f"timeline_{prefixo}.png",
                     failure_events=failure_events,
                     title=f"{args.equipment} — {model_name}|{preset_name} + {nome_detector}",
+                    eventos=drift_events,
                 )
 
                 n_retreinos = len(retrain_log) - 1 if len(retrain_log) else 0
@@ -595,6 +826,8 @@ def main():
                 resumo_linhas.append({
                     "model": model_name, "preset": preset_name, "detector": nome_detector,
                     "n_retreinos": n_retreinos,
+                    "n_bloqueios_degradacao": int((drift_events["decisao"] == "retreino_bloqueado_degradacao").sum())
+                                              if len(drift_events) else 0,
                     "composite_score": metrics.get("composite_score"),
                     "prefailure_alert_rate": metrics.get("prefailure_alert_rate"),
                     "normal_alert_rate": metrics.get("normal_alert_rate"),
@@ -654,7 +887,51 @@ def main():
                 logger.report_image("timelines_top5", prefixo, local_path=str(img), iteration=0)
 
         logger.report_table("resumo", "grade_completa", table_plot=resumo)
-        print("✓ Upload completo")
+
+        # UM único artefato ("resultados") com tudo que o notebook de análise precisa:
+        # meta, resumo, uma série por combinação, retreinos e eventos de drift.
+        # As tabelas vão serializadas em parquet (compacto e independente da versão do pandas).
+        import io, json
+
+        def _pq(df: pd.DataFrame) -> bytes:
+            buf = io.BytesIO()
+            df.to_parquet(buf)
+            return buf.getvalue()
+
+        series, logs_all, events_all = {}, [], []
+        for _, row in resumo.iterrows():
+            prefixo = f"{row['model']}_{row['preset']}_{row['detector']}"
+            combo = f"{row['model']} | {row['preset']} | {row['detector']}"
+            fs_path = output_dir / f"full_scores_{prefixo}.parquet"
+            if fs_path.exists():
+                fs = pd.read_parquet(fs_path)
+                fs.index.name = "timestamp"
+                series[combo] = _pq(fs.reset_index())
+            lg_path = output_dir / f"retrain_log_{prefixo}.csv"
+            if lg_path.exists():
+                logs_all.append(pd.read_csv(lg_path).assign(combo=combo))
+            ev_path = output_dir / f"drift_events_{prefixo}.csv"
+            if ev_path.exists() and ev_path.stat().st_size > 5:
+                events_all.append(pd.read_csv(ev_path).assign(combo=combo))
+
+        pacote = {
+            "versao": 1,
+            "meta": {
+                "equipment": args.equipment,
+                "failure_events": [str(e) for e in (failure_events or [])],
+                "prefailure_days": args.prefailure_days,
+                "normal_end_days": args.normal_end_days,
+                "args": json.loads(json.dumps(vars(args), default=str)),
+            },
+            "resumo": _pq(resumo),
+            "series": series,
+            "logs": _pq(pd.concat(logs_all, ignore_index=True)) if logs_all else None,
+            "eventos": _pq(pd.concat(events_all, ignore_index=True)) if events_all else None,
+        }
+        # embrulhado em lista para o ClearML serializar como pickle (um dict viraria JSON)
+        task.upload_artifact("resultados", artifact_object=[pacote], auto_pickle=True,
+                             wait_on_upload=True)
+        print(f"✓ Upload completo — artefato único 'resultados' ({len(series)} séries)")
 
 
 if __name__ == "__main__":

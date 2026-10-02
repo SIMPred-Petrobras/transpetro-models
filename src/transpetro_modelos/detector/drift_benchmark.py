@@ -18,6 +18,9 @@ Uso típico (com os erros de reconstrução que o automl já calcula):
         true_drift_time=pd.Timestamp("2024-06-01"),  # início real da falha/drift
     )
     print(report.sort_values("detection_delay_samples"))
+
+`default_detectors` já inclui o "ks_calibrado" (CalibratedKSDetector). Ele só
+entra se a referência tiver pelo menos 2 x 288 pontos.
 """
 
 from __future__ import annotations
