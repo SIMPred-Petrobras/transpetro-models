@@ -117,6 +117,36 @@ def remove_transients(df: pd.DataFrame, minutes: int = 10, gap_minutes: int = 5)
 
     return df[mask].copy()
 
+def remove_regime_transients(
+    df: pd.DataFrame,
+    columns: list[str],
+    deltas: list[float],
+    minutes: int = 90,
+    window: int = 3,
+) -> pd.DataFrame:
+    """
+    Remove os `minutes` seguintes a um DEGRAU brusco de processo (ex.: manobra de pressão).
+
+    Um degrau é |x_t - x_{t-window}| > delta em qualquer coluna listada (`window` em linhas da
+    grade já reamostrada; ex.: 3 linhas de 5 min = 15 min). Mesma ideia do remove_transients
+    (que trata partidas), mas disparada por mudança de regime operacional — evita que o
+    autoencoder acuse manobras de processo como anomalia do equipamento. Colunas ausentes são
+    ignoradas. Use APÓS resample/ffill e ANTES de select_features.
+    """
+    if len(df) == 0:
+        return df
+    step = pd.Series(False, index=df.index)
+    for col, delta in zip(columns, deltas):
+        if col in df.columns:
+            step |= df[col].diff(window).abs() > delta
+    if not step.any():
+        return df
+    last_step = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    last_step[step] = df.index[step]
+    last_step = last_step.ffill()
+    since = (df.index - last_step)
+    in_mask = (since >= pd.Timedelta(0)) & (since < pd.Timedelta(minutes=minutes))
+    return df[~in_mask.fillna(False).values].copy()
 
 def clip(
     df: pd.DataFrame,
@@ -144,6 +174,64 @@ def clip(
 
     return df, bounds
 
+def moving_average(
+    df: pd.DataFrame,
+    window: int = 3,
+    min_periods: int = 1,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Apply a causal rolling mean to selected columns."""
+    if columns is None:
+        columns = list(df.columns)
+
+    df = df.copy()
+    df[columns] = df[columns].rolling(window=window, min_periods=min_periods, center=False).mean()
+    return df
+
+def add_rolling_features(
+    df: pd.DataFrame,
+    windows: list[int] | None = None,
+    include_diff: bool = True,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """
+    Adiciona features de janela deslizante causal (média, desvio padrão, diff) lado a lado
+    com as colunas originais.
+
+    Parâmetros
+    ----------
+    windows : list[int]
+        Tamanhos das janelas em número de períodos. Ex.: [6, 24] para dados horários
+        equivale a 6 h e 24 h. Default: [6, 24].
+    include_diff : bool
+        Se True, inclui a primeira diferença (taxa de mudança) de cada sensor.
+    columns : list[str] | None
+        Colunas a expandir. Default: todas.
+
+    Notas
+    -----
+    - Usa rolling causal (center=False), sem look-ahead.
+    - Linhas com NaN gerados no início de cada janela são removidas via dropna().
+    - Aplique este passo ANTES do clip/normalize no preset para que os limites
+      de clipping sejam calculados sobre as features enriquecidas.
+    - Em val/test o mesmo conjunto de colunas que o train produz é gerado, pois
+      a lista de colunas é derivada dos dados de entrada.
+    """
+    if windows is None:
+        windows = [6, 24]
+    if columns is None:
+        columns = list(df.columns)
+
+    df = df.copy()
+    for col in columns:
+        for w in windows:
+            min_p = max(2, w // 2)
+            df[f"{col}__std{w}"] = df[col].rolling(w, min_periods=min_p).std()
+            df[f"{col}__mean{w}"] = df[col].rolling(w, min_periods=min_p).mean()
+        if include_diff:
+            df[f"{col}__diff"] = df[col].diff()
+
+    return df.dropna()
 
 def normalize(
     df: pd.DataFrame,

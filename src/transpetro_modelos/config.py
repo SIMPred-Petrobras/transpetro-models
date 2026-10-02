@@ -11,6 +11,9 @@ class EquipmentConfig:
     exclusion_days_before: int
     preprocessing_steps: list[dict]
 
+    prefailure_days: int | None = None
+    normal_end_days: int | None = None
+
     failure_date: datetime | None = None
     failure_description: str | None = None
     failure_events: list[str] | None = None
@@ -209,6 +212,58 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         ],
         preprocessing_steps=deepcopy(PREPROCESSING_PIPELINES["baseline_interpolated"]),
         preprocess_presets=INTERPOLATED_PRESETS,
+    ),
+
+    "B-8802B": EquipmentConfig(
+        equipment_id="B-8802B",
+        # RETREINO PÓS-DRIFT (ago/2026): o modelo de 2022 dá 12% de alarme em 2025-26
+        # (reparo pós-falha + faixa de regimes mais ampla que as 6 semanas do treino original).
+        # NÃO há falha conhecida neste período: failure_date abaixo é SENTINELA (fim dos dados
+        # 2026-08-10 + 1 dia) só para satisfazer o split; a janela pré-falha resultante mede FP
+        # em dado recente, não detecção. Seleção deve usar --select-by heldout (FP em 2026
+        # nunca visto). Sensibilidade é validada à parte, pontuando a falha de 2022 com o
+        # modelo novo. Dados: b8802b-2025-2026/ (COV IFIX) -> grade 1 min hold-last-value.
+        failure_date=datetime(2022, 7, 6, 10, 0),
+        failure_description="Trinca nas lâminas do acoplamento",
+        dataset_name="transpetro-b-8802b",
+        datetime_column=None,
+        exclusion_days_before=1,
+        prefailure_days=7,
+        normal_end_days=20,
+        # treino = 2025 inteiro (cobre os regimes); held-out = jan-jun/2026
+        val_start_date=datetime(2022, 5, 1),
+        val_end_date=datetime(2022, 6, 1),
+        local_feather="Dados/B-8802B.csv",
+        pre_split_steps=[
+            {"step": "remove_sensor_errors", "error_values": [0.0]},
+            {"step": "filter_running", "column": "Pressão Descarga", "threshold": 35.0},
+            {"step": "resample", "freq": "5min"},
+            {"step": "ffill", "limit": 4},
+            {"step": "remove_transients", "minutes": 90, "gap_minutes": 30},
+            # Máscara de transiente de PROCESSO (manobra): degrau >1,5×p99 da variação normal em
+            # 15 min (sucção 2,4 bar / descarga 4,8 bar) -> ignora os 90 min seguintes. Corta os
+            # blips de FP dirigidos por pressão sem alterar a sensibilidade (validado: falha 2022 e
+            # falha sintética inalteradas; FP held-out 0,063% -> 0,038%).
+            {"step": "remove_regime_transients", "columns": ["Pressão Sucção", "Pressão Descarga"],
+             "deltas": [2.4, 4.8], "minutes": 90, "window": 3},
+            {"step": "select_features", "features": ["Pressão Sucção", "Pressão Descarga", "Vibração Bomba LA", "Vibração Bomba LNA", "Temperatura Bomba LA"]},
+        ],
+        preprocessing_steps=[
+            {"step": "clip", "upper_pct": 99.9},
+            {"step": "normalize", "method": "robust"},
+        ],
+        preprocess_presets={
+            "baseline": [
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+            "rolling_ma": [
+                {"step": "moving_average", "window": 3, "min_periods": 1},
+                {"step": "add_rolling_features", "windows": [12, 72]},
+                {"step": "clip", "upper_pct": 99.9},
+                {"step": "normalize", "method": "robust"},
+            ],
+        },
     ),
 }
 
