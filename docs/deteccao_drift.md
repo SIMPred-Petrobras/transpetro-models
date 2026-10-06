@@ -63,7 +63,9 @@ não gerou disparo robusto. O `ResidualLevelDetector` ajusta na referência uma 
 temperaturas do motor, a corrente e as pressões, e monitora a mediana diária do resíduo (faixa p0,5–p99,5 da
 referência, 3 de 5 dias). No B-8802B ele dispara 4 dias depois do degrau, sem disparo em 2025; no B-4064A acha a
 mudança pós-reparo em ~2,5 dias e não dispara com referência de só 4 meses (o KS dá 2 falsos, pela estação). Só
-serve quando a regressão explica o sensor (no mancal LNA do B-8802B, R² 0,32: fica no KS). Ainda não está no monitor.
+serve quando a regressão explica o sensor (no mancal LNA do B-8802B, R² 0,32: fica no KS). No monitor é o M8:
+`--make-residual-ref` grava `residual_ref.json` no bundle, e `drift/retrain.py` recalibra os dois detectores em todo
+bundle novo.
 Análise: `notebooks/drift/mudanca_conceito_B-8802B.ipynb`.
 
 ## O que não foi incorporado

@@ -113,8 +113,9 @@ a pasta `B-8802B/` (modelo de 2022) foi mantida **intacta para comparação**. E
 
 Guia de migração passo a passo (o que muda, como validar, rollback): **`B-8802B-2025/MIGRACAO.md`**.
 
-## Monitoramento semanal (drift)
+## Monitoramento semanal (drift) e retreino
 
-O pacote inclui `monitor_drift.py`: um passo opcional, rodado 1× por semana sobre o CSV que a própria
-inferência gera, que acende verde/amarelo/vermelho quando o "normal" da operação se afasta do que o modelo
-aprendeu (mudança de conceito). Guia de operação: **`MONITORAMENTO.md`**.
+O pacote inclui `monitor_drift.py`, rodado 1× por semana sobre o CSV que a própria inferência gera. Ele acende
+verde/amarelo/vermelho quando o "normal" da operação se afasta do que o modelo aprendeu (mudança de conceito) e
+avisa quando há dado congelado. Usa `drift_ref.json` e `residual_ref.json`, que vêm dentro do bundle.
+Guia de integração, com o que fazer em cada status e o fluxo de retreino: **`MONITORAMENTO.md`**.
