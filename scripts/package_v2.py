@@ -399,8 +399,42 @@ def carregar_modelo(bundle_dir):
 # ════════════════════════════════════════════════════════════════════════════
 # 4) PREVER
 # ════════════════════════════════════════════════════════════════════════════
-def prever(bundle_dir, model, df_proc: pd.DataFrame) -> pd.DataFrame:
-    """Erro de reconstrução (MSE) por instante -> severity (normal/atencao/alarme)."""
+def _instantes_com_operacao(bundle_dir, df_bruto, index):
+    """True nos instantes em que a bomba estava de fato operando, pelo CSV bruto e pelos filter_running do
+    pipeline.json. O ffill do pipeline preenche alguns minutos de cada parada repetindo o último valor: esses
+    instantes não são medição real e não entram na persistência do alarme."""
+    steps = json.loads((Path(bundle_dir) / "pipeline.json").read_text())
+    liga = pd.Series(True, index=df_bruto.index)
+    for s in steps:
+        if s["step"] == "filter_running" and s["column"] in df_bruto.columns:
+            liga &= df_bruto[s["column"]] > s["threshold"]
+    freq = next((s.get("freq", "5min") for s in steps if s["step"] == "resample"), "5min")
+    real = liga.astype(float).resample(freq).max() > 0
+    return real.reindex(index, fill_value=False)
+
+def _duracao_minima(flag, horas, quebra="1h"):
+    """Alerta só quando o alarme dura `horas` ou mais, e a partir desse ponto. Um alarme é um bloco de instantes
+    em alarme sem buraco maior que `quebra`."""
+    out = pd.Series(False, index=flag.index)
+    a = flag[flag]
+    if a.empty:
+        return out
+    bloco = (a.index.to_series().diff() > pd.Timedelta(quebra)).cumsum()
+    for _, e in a.groupby(bloco):
+        inicio = e.index.min()
+        if e.index.max() - inicio >= pd.Timedelta(hours=horas):
+            out[e.index[e.index >= inicio + pd.Timedelta(hours=horas)]] = True
+    return out
+
+def prever(bundle_dir, model, df_proc: pd.DataFrame, df_bruto: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Erro de reconstrução (MSE) por instante -> alarme -> alerta -> severity (normal/atencao/alarme).
+
+    Opções no alarm.json (bundles sem elas se comportam como antes):
+      persistence_mode = "time": a persistência k-de-n é contada no TEMPO (n × passo), não em linhas, então a
+          janela não junta instantes de antes e de depois de uma parada; com `df_bruto` (o CSV bruto da
+          inferência), os minutos de parada preenchidos pelo ffill ficam fora.
+      min_alert_hours: o alarme só vira ALERTA (coluna `alerta`) se durar isso ou mais (regra de 1 hora).
+    """
     bundle_dir = Path(bundle_dir)
     alarm = json.loads((bundle_dir / "alarm.json").read_text())
     threshold = float(alarm["threshold"])              # nível de ALARME
@@ -418,11 +452,21 @@ def prever(bundle_dir, model, df_proc: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame({"reconstruction_error": erro}, index=df_proc.index)
     acima = out["reconstruction_error"] > threshold
 
-    # dispara só quando `k_persist` dos últimos `n_persist` pontos passam do limite
-    if n_persist > 1:
+    if alarm.get("persistence_mode") == "time":
+        passo = pd.Timedelta(alarm.get("persistence_step", "5min"))
+        real = (_instantes_com_operacao(bundle_dir, df_bruto, out.index) if df_bruto is not None
+                else pd.Series(True, index=out.index))
+        a = acima[real].astype(float)
+        janela = n_persist * passo
+        cont, n = a.rolling(janela).sum(), a.rolling(janela).count()
+        acima = ((cont >= k_persist) & (n >= n_persist)).reindex(out.index, fill_value=False)
+    elif n_persist > 1:
+        # dispara só quando `k_persist` dos últimos `n_persist` pontos passam do limite
         cont = acima.astype(int).rolling(n_persist, min_periods=n_persist).sum()
         acima = (cont >= k_persist).fillna(False)
     out["is_anomaly"] = acima
+    horas = alarm.get("min_alert_hours")
+    out["alerta"] = _duracao_minima(acima, float(horas)) if horas else acima
 
     sev = pd.Series("normal", index=out.index, dtype=object)
     if atencao is not None:
@@ -475,7 +519,7 @@ def main():
     model = si.carregar_modelo(BUNDLE_DIR)
 
     print(f"[{EQUIP}] 4/4 inferindo...")
-    res = si.prever(BUNDLE_DIR, model, df_proc)
+    res = si.prever(BUNDLE_DIR, model, df_proc, df_bruto=df)
 
     # ── Resumo (sem despejar todos os alarmes na tela) ──
     n_alarme = int((res["severity"] == "alarme").sum())
@@ -484,6 +528,8 @@ def main():
     print(f"\n{EQUIP}: {len(res)} instantes | {n_atencao} atenção | {n_alarme} alarme")
     if len(alarmes):
         print(f"        1º alarme: {alarmes.index.min()}  |  último: {alarmes.index.max()}")
+    alertas = res[res["alerta"]]   # alarmes que duraram o mínimo do alarm.json (regra de 1 h): vão para a operação
+    print(f"        alertas: {len(alertas)} instantes" + (f" | 1º: {alertas.index.min()}  |  último: {alertas.index.max()}" if len(alertas) else ""))
 
     # Salva o resultado completo (para inspeção / integração)
     nome_csv = EQUIP.lower().replace("-", "").replace(".", "") + "_inferencia.csv"

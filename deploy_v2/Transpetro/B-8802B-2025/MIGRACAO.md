@@ -55,9 +55,11 @@ As duas pastas coexistem de propósito (histórico/comparação). **Em produçã
 ## 3. O que NÃO muda
 
 - **Entrada:** CSV com 1ª coluna de timestamp e os sensores nas demais (mesmos nomes de coluna).
-- **Os 4 passos:** `carregar_dados → preprocessar → carregar_modelo → prever` — mesmas funções, mesmas assinaturas.
+- **Os 4 passos:** `carregar_dados → preprocessar → carregar_modelo → prever` — mesmas funções. `prever()` ganhou
+  um argumento opcional, `df_bruto`: passe o mesmo DataFrame lido por `carregar_dados` (ver o passo 1 abaixo).
 - **Saída de `prever()`:** DataFrame indexado por timestamp com `reconstruction_error`, `is_anomaly`, `severity`
-  (`normal` / `atencao` / `alarme`).
+  (`normal` / `atencao` / `alarme`) e a coluna nova **`alerta`**: o alarme que durou 1 hora ou mais. **É a coluna
+  `alerta` que vai para a operação.**
 - **Formato dos artefatos:** `model_state.pt`, `model_arch.json`, `scaler.pkl`, `clip_bounds.json`, `pipeline.json`, `alarm.json`.
 
 ## 4. Passo a passo da migração
@@ -65,15 +67,20 @@ As duas pastas coexistem de propósito (histórico/comparação). **Em produçã
 1. **Atualize o módulo compartilhado** `Transpetro/simpred_inference.py` (versão desta entrega). Ele ganhou:
    - o passo `remove_regime_transients` no despacho de pré-processamento;
    - persistência **k-de-n** (`debounce_window`/`debounce_min`), **retrocompatível**: bundles antigos que só têm
-     `debounce_consecutive` continuam funcionando igual.
+     `debounce_consecutive` continuam funcionando igual;
+   - persistência contada no **tempo** e regra de **1 hora** (ligadas por `persistence_mode` e `min_alert_hours` no
+     `alarm.json` deste bundle). Com `prever(..., df_bruto=df)`, os minutos de parada que o pré-processamento
+     preenche repetindo o último valor ficam fora do alarme; sem isso, um alarme podia "atravessar" uma parada;
+   - o passo `remove_frozen_segments` (dado congelado), disponível para os próximos bundles.
 2. **Aponte para o novo bundle**: `Transpetro/B-8802B-2025/modelos/model_2025-01-01_2026-08-10_VAE/`.
 3. **Rode o exemplo** para validar o ambiente:
    ```bash
    cd Transpetro/
    python3 B-8802B-2025/scripts/b8802b2025_exemplo.py
    ```
-   Saída esperada com o CSV de exemplo (jan/2025 → 10/ago/2026): **~139 mil instantes · ~55 alarmes · 4 episódios**
-   (06/12/2025, 17/01/2026, 24/07/2026, 10/08/2026). Se os números baterem, a integração está correta.
+   Saída esperada com o CSV de exemplo (jan/2025 → 10/ago/2026): **139.264 instantes · 30 instantes de alarme em 4
+   episódios** (06/12/2025, 17/01/2026, 24/07/2026, 10/08/2026) **· 1 alerta** (17/01/2026 22:30, o único alarme
+   de 1 hora ou mais). Se os números baterem, a integração está correta.
 4. (Opcional) Compare com o antigo rodando `B-8802B/scripts/b8802b_exemplo.py` sobre o mesmo CSV: ele deve dar
    **~12% de alarme** — é a evidência do drift.
 
@@ -95,11 +102,13 @@ Efeito prático: ~4% do tempo de operação é descartado; falso positivo cai ~4
 
 ## 6. Como interpretar os alarmes do modelo novo
 
-- **`alarme`** só dispara com sinal **sustentado** (15 de 20 leituras de 5 min ≈ 1h15–1h40 acima do limiar).
-  Um pico isolado não alarma.
-- Em 19,5 meses de dados o modelo apontou **4 episódios**; dois merecem verificação com a operação:
-  **06/12/2025** (mancal da bomba LA ~7,5 °C acima do normal por horas) e **10/08/2026** (pico de pressão de
-  descarga a 73 bar, último dia do dado). Não são "falhas" confirmadas — são anomalias reais nos sensores a checar.
+- **`alarme`** só dispara com sinal **sustentado** (15 de 20 leituras de 5 min com a bomba operando acima do
+  limiar). Um pico isolado não alarma.
+- **`alerta`** é o alarme que durou **1 hora ou mais**, a partir desse ponto: é o que vai para a operação. Uma
+  degradação real não some em minutos (a falha de 2022 ficou ~2 dias em alarme), então a regra corta só oscilações
+  curtas, ao custo de o alerta sair até 1 hora mais tarde.
+- Em 19,5 meses de dados o modelo deu 4 alarmes e **1 alerta: 17/01/2026**, vibração dos dois mancais acima do
+  esperado. É uma anomalia real nos sensores a checar com a operação, não uma "falha" confirmada.
 - **`atencao`** (limiar μ+4σ) é nível informativo; não deve abrir OS.
 
 ## 7. Formato dos dados de entrada (atenção para o online)
@@ -116,7 +125,7 @@ antigo dá ~12% de alarme no dado atual.)
 
 ## 9. Próximos passos (roadmap, não bloqueia a integração)
 
-- **Monitor de drift**: acompanhar semanalmente a taxa de alarme e a média/desvio do erro; alta sustentada sem
-  causa física conhecida → sinal para recalibrar/retreinar. Recomendação: **não** retreinar automaticamente por
-  período fixo (risco de absorver uma degradação lenta no "normal").
+- **Monitor de drift**: rodar 1× por semana (`monitor_drift.py`); guia completo, com o fluxo de retreino, em
+  **`../MONITORAMENTO.md`**. Recomendação: **não** retreinar automaticamente por período fixo (risco de absorver
+  uma degradação lenta no "normal").
 - Após **manutenção/reparo** do equipamento, avisar o time de modelos: pode ser necessário recalibrar o limiar.

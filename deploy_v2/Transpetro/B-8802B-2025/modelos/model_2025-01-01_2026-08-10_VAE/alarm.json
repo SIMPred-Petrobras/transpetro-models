@@ -39,5 +39,8 @@
       "end": "2025-12-31 23:55:00",
       "n_points": 82991
     }
-  }
+  },
+  "persistence_mode": "time",
+  "persistence_step": "5min",
+  "min_alert_hours": 1.0
 }

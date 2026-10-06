@@ -37,7 +37,7 @@ def main():
     model = si.carregar_modelo(BUNDLE_DIR)
 
     print(f"[{EQUIP}] 4/4 inferindo...")
-    res = si.prever(BUNDLE_DIR, model, df_proc)
+    res = si.prever(BUNDLE_DIR, model, df_proc, df_bruto=df)
 
     # ── Resumo (sem despejar todos os alarmes na tela) ──
     n_alarme = int((res["severity"] == "alarme").sum())
@@ -46,6 +46,8 @@ def main():
     print(f"\n{EQUIP}: {len(res)} instantes | {n_atencao} atenção | {n_alarme} alarme")
     if len(alarmes):
         print(f"        1º alarme: {alarmes.index.min()}  |  último: {alarmes.index.max()}")
+    alertas = res[res["alerta"]]   # alarmes que duraram o mínimo do alarm.json (regra de 1 h): vão para a operação
+    print(f"        alertas: {len(alertas)} instantes" + (f" | 1º: {alertas.index.min()}  |  último: {alertas.index.max()}" if len(alertas) else ""))
 
     # Salva o resultado completo (para inspeção / integração)
     nome_csv = EQUIP.lower().replace("-", "").replace(".", "") + "_inferencia.csv"
