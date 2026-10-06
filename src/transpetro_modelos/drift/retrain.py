@@ -2,7 +2,7 @@
 Pipeline de retreino (estágio 3 da política de drift) — executa a receita validada no B-8802B-2025:
   check   → portão: janela aprovada pela operação + dados mínimos (>= 12 meses e >= 4000 h de operação)
   train   → grade local compacta (seeds × hiperparâmetros), seleção por FP held-out (régua de deploy μ+6,5σ + 15/20)
-  package → bundle de deploy autocontido (pesos + arch + scaler + clip + pipeline + alarm + drift_ref)
+  package → bundle de deploy autocontido (pesos + arch + scaler + clip + pipeline + alarm + drift_ref + residual_ref)
   battery → bateria completa (scripts/battery.py) no bundle empacotado; reprova → tenta o próximo candidato
 
 NUNCA roda sem `--operacao-confirmou` (registro de que a operação confirmou que a janela é operação normal).
@@ -126,6 +126,12 @@ def main():
                                       "candidate": cand["tag"]}}, indent=1, ensure_ascii=False))
         print(f"\n[package] candidato #{i} ({cand['tag']}) → {bdir}", flush=True)
         mon.make_drift_ref(Path(data_csv), bdir)
+        # M8: herda do bundle em produção quais temperaturas monitorar e com quais preditores, e recalibra no
+        # período de treino do bundle novo (a referência dos detectores = o período em que o modelo aprendeu)
+        rr_atual = Path(battery.BATTERY[a.equipment]["bundle"]) / "residual_ref.json"
+        if rr_atual.exists():
+            m8 = json.loads(rr_atual.read_text())["detectors"]
+            mon.make_residual_ref(Path(data_csv), bdir, [d["target"] for d in m8], m8[0]["predictors"])
         print(f"[battery] candidato #{i}:", flush=True)
         res = battery.run_battery(a.equipment, bundle=bdir, train_end=str(te.date()), heldout_end=str(he.date()))
         (out / f"battery_cand{i}.json").write_text(json.dumps(res, indent=1, ensure_ascii=False, default=str))

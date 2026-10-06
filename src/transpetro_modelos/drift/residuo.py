@@ -20,12 +20,15 @@ Validação (notebooks/drift/mudanca_conceito_B-8802B.ipynb):
   bruto dá 2, pela estação) e 0 com 12 meses; não dispara na rampa de 2 dias da falha (papel do modelo de anomalia).
 Limite: precisa de uma regressão que explique o sensor (no mancal LNA do B-8802B, R² 0,32 e faixa de −6 a +22 °C:
 não serve); e, como o KS, de referência longa o bastante para cobrir os regimes.
+
+No monitor é o indicador M8: `scripts/monitor_drift.py --make-residual-ref` calibra e grava `residual_ref.json` no
+bundle (`to_dict`/`from_dict`). Só numpy e pandas (sem scikit-learn), para o monitor do pacote de deploy poder embutir
+esta classe.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
 
 
 class ResidualLevelDetector:
@@ -37,13 +40,17 @@ class ResidualLevelDetector:
         self.q, self.k, self.n = q, k, n
         self.min_coverage = min_coverage      # fração mínima do dia com operação para o dia contar
         self.reset_gap = pd.Timedelta(reset_gap)
-        self.model: LinearRegression | None = None
+        self.coef: np.ndarray | None = None
+        self.intercept: float | None = None
         self.band: tuple[float, float] | None = None
         self.r2: float | None = None
 
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        return df[self.predictors].to_numpy(dtype=float) @ self.coef + self.intercept
+
     def residuals(self, df: pd.DataFrame) -> pd.Series:
         """Resíduo instante a instante (medido − previsto)."""
-        return df[self.target] - self.model.predict(df[self.predictors])
+        return df[self.target] - self.predict(df)
 
     def daily(self, df: pd.DataFrame) -> pd.Series:
         """Mediana diária do resíduo, só nos dias com operação suficiente."""
@@ -54,11 +61,29 @@ class ResidualLevelDetector:
         return r.resample("1D").median()[n >= minimo]
 
     def fit(self, reference: pd.DataFrame) -> "ResidualLevelDetector":
-        self.model = LinearRegression().fit(reference[self.predictors], reference[self.target])
-        self.r2 = float(self.model.score(reference[self.predictors], reference[self.target]))
-        lo, hi = self.daily(reference).quantile([self.q, 1 - self.q])
+        ref = reference[self.predictors + [self.target]].dropna()
+        X = np.column_stack([ref[self.predictors].to_numpy(dtype=float), np.ones(len(ref))])
+        y = ref[self.target].to_numpy(dtype=float)
+        beta = np.linalg.lstsq(X, y, rcond=None)[0]                  # mínimos quadrados = regressão linear
+        self.coef, self.intercept = beta[:-1], float(beta[-1])
+        res = y - X @ beta
+        self.r2 = float(1 - (res ** 2).sum() / ((y - y.mean()) ** 2).sum())
+        lo, hi = self.daily(ref).quantile([self.q, 1 - self.q])
         self.band = (float(lo), float(hi))
         return self
+
+    def to_dict(self) -> dict:
+        return {"target": self.target, "predictors": self.predictors, "coef": [float(v) for v in self.coef],
+                "intercept": self.intercept, "band": list(self.band), "r2": self.r2, "q": self.q, "k": self.k,
+                "n": self.n, "min_coverage": self.min_coverage, "reset_gap": str(self.reset_gap)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ResidualLevelDetector":
+        det = cls(d["target"], d["predictors"], q=d["q"], k=d["k"], n=d["n"], min_coverage=d["min_coverage"],
+                  reset_gap=d["reset_gap"])
+        det.coef, det.intercept = np.asarray(d["coef"], dtype=float), float(d["intercept"])
+        det.band, det.r2 = tuple(d["band"]), d.get("r2")
+        return det
 
     def scan(self, df: pd.DataFrame) -> tuple[pd.Series, list[pd.Timestamp]]:
         """(mediana diária do resíduo, disparos). Depois de cada disparo a contagem recomeça."""

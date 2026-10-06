@@ -1,0 +1,34 @@
+{
+ "reference_window": [
+  "2025-01-01 02:30:00",
+  "2025-12-31 23:55:00"
+ ],
+ "detectors": [
+  {
+   "target": "Temperatura Bomba LA",
+   "predictors": [
+    "Temperatura Motor LA",
+    "Temperatura Motor LNA",
+    "Pressão Descarga",
+    "Pressão Sucção"
+   ],
+   "coef": [
+    0.6396640631263235,
+    0.05490486294726073,
+    0.1516960527642179,
+    0.021566416833298983
+   ],
+   "intercept": -1.8173647479228052,
+   "band": [
+    -5.187309170069517,
+    6.8105972111089805
+   ],
+   "r2": 0.6057257296689293,
+   "q": 0.005,
+   "k": 3,
+   "n": 5,
+   "min_coverage": 0.5,
+   "reset_gap": "3 days 00:00:00"
+  }
+ ]
+}

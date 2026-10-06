@@ -17,6 +17,7 @@ DRIFT = ROOT / "src/transpetro_modelos/drift"
 OUT = ROOT / "deploy_v2/Transpetro/monitor_drift.py"
 IMPORT_LINE = "from transpetro_modelos.drift.detectors import CalibratedKSDetector"
 CLASSES = ("BaseDriftDetector", "CalibratedKSDetector")
+IMPORT_RES = "from transpetro_modelos.drift.residuo import ResidualLevelDetector\n"
 
 
 def build() -> str:
@@ -38,9 +39,16 @@ def build() -> str:
     mon_src = (DRIFT / "monitor.py").read_text()
     if mon_src.count(IMPORT_LINE) != 1:
         raise SystemExit(f"monitor.py precisa ter exatamente uma linha '{IMPORT_LINE}'")
-    corpo = mon_src.replace(IMPORT_LINE, embutido)
+    res_src = (DRIFT / "residuo.py").read_text()
+    res_tree = ast.parse(res_src)
+    res_cls = [ast.get_source_segment(res_src, n) for n in res_tree.body if isinstance(n, ast.ClassDef) and n.name == "ResidualLevelDetector"]
+    if len(res_cls) != 1 or mon_src.count(IMPORT_RES) != 1:
+        raise SystemExit("residuo.py precisa da classe ResidualLevelDetector e monitor.py de uma linha de import dela")
+    embutido += ("\n# ── detector do M8 embutido (cópia GERADA de src/transpetro_modelos/drift/residuo.py) ──\n\n"
+                 + res_cls[0] + "\n")
+    corpo = mon_src.replace(IMPORT_RES, "").replace(IMPORT_LINE, embutido)
     cabecalho = ("# ARQUIVO GERADO por scripts/package_monitor.py a partir de src/transpetro_modelos/drift/monitor.py\n"
-                 "# e drift/detectors.py. Não edite aqui: edite a origem e rode o gerador.\n")
+                 "# e drift/detectors.py + drift/residuo.py. Não edite aqui: edite a origem e rode o gerador.\n")
     return cabecalho + corpo
 
 

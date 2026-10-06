@@ -1,5 +1,5 @@
 # ARQUIVO GERADO por scripts/package_monitor.py a partir de src/transpetro_modelos/drift/monitor.py
-# e drift/detectors.py. Não edite aqui: edite a origem e rode o gerador.
+# e drift/detectors.py + drift/residuo.py. Não edite aqui: edite a origem e rode o gerador.
 """
 Monitor de drift do SIMPred — calcula, semana a semana, os indicadores da política de retreino
 (docs/politica_retreino.md) a partir do CSV que o próprio pacote de deploy gera
@@ -267,6 +267,77 @@ class CalibratedKSDetector(BaseDriftDetector):
         return d_diario, disparos
 
 
+# ── detector do M8 embutido (cópia GERADA de src/transpetro_modelos/drift/residuo.py) ──
+
+class ResidualLevelDetector:
+    """Mediana diária do resíduo de um modelo de comportamento normal fora da faixa da referência."""
+
+    def __init__(self, target: str, predictors: list[str], q: float = 0.005, k: int = 3, n: int = 5,
+                 min_coverage: float = 0.5, reset_gap: str = "3D"):
+        self.target, self.predictors = target, list(predictors)
+        self.q, self.k, self.n = q, k, n
+        self.min_coverage = min_coverage      # fração mínima do dia com operação para o dia contar
+        self.reset_gap = pd.Timedelta(reset_gap)
+        self.coef: np.ndarray | None = None
+        self.intercept: float | None = None
+        self.band: tuple[float, float] | None = None
+        self.r2: float | None = None
+
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        return df[self.predictors].to_numpy(dtype=float) @ self.coef + self.intercept
+
+    def residuals(self, df: pd.DataFrame) -> pd.Series:
+        """Resíduo instante a instante (medido − previsto)."""
+        return df[self.target] - self.predict(df)
+
+    def daily(self, df: pd.DataFrame) -> pd.Series:
+        """Mediana diária do resíduo, só nos dias com operação suficiente."""
+        r = self.residuals(df)
+        passo = df.index.to_series().diff().median()
+        minimo = self.min_coverage * (pd.Timedelta("1D") / passo)
+        n = r.resample("1D").count()
+        return r.resample("1D").median()[n >= minimo]
+
+    def fit(self, reference: pd.DataFrame) -> "ResidualLevelDetector":
+        ref = reference[self.predictors + [self.target]].dropna()
+        X = np.column_stack([ref[self.predictors].to_numpy(dtype=float), np.ones(len(ref))])
+        y = ref[self.target].to_numpy(dtype=float)
+        beta = np.linalg.lstsq(X, y, rcond=None)[0]                  # mínimos quadrados = regressão linear
+        self.coef, self.intercept = beta[:-1], float(beta[-1])
+        res = y - X @ beta
+        self.r2 = float(1 - (res ** 2).sum() / ((y - y.mean()) ** 2).sum())
+        lo, hi = self.daily(ref).quantile([self.q, 1 - self.q])
+        self.band = (float(lo), float(hi))
+        return self
+
+    def to_dict(self) -> dict:
+        return {"target": self.target, "predictors": self.predictors, "coef": [float(v) for v in self.coef],
+                "intercept": self.intercept, "band": list(self.band), "r2": self.r2, "q": self.q, "k": self.k,
+                "n": self.n, "min_coverage": self.min_coverage, "reset_gap": str(self.reset_gap)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ResidualLevelDetector":
+        det = cls(d["target"], d["predictors"], q=d["q"], k=d["k"], n=d["n"], min_coverage=d["min_coverage"],
+                  reset_gap=d["reset_gap"])
+        det.coef, det.intercept = np.asarray(d["coef"], dtype=float), float(d["intercept"])
+        det.band, det.r2 = tuple(d["band"]), d.get("r2")
+        return det
+
+    def scan(self, df: pd.DataFrame) -> tuple[pd.Series, list[pd.Timestamp]]:
+        """(mediana diária do resíduo, disparos). Depois de cada disparo a contagem recomeça."""
+        d = self.daily(df)
+        lo, hi = self.band
+        disparos, hist, anterior = [], [], None
+        for t, v in d.items():
+            if anterior is not None and t - anterior > self.reset_gap:
+                hist = []
+            anterior = t
+            hist = (hist + [bool(v < lo or v > hi)])[-self.n:]
+            if sum(hist) >= self.k:
+                disparos.append(t)
+                hist = []
+        return d, disparos
+
 
 # ── Gatilhos da política (docs/politica_retreino.md, seção 3): regra k-de-n sobre as últimas n semanas
 #    válidas (robusta a uma semana quieta no meio de um drift). Calibrados no B-8802B:
@@ -354,10 +425,14 @@ M6_WIN, M6_KCONSEC, M6_NWIN, M6_NREF = 288, 3, 5, 2000
 M6_RESET_GAP = "3D"   # parada maior que isso zera a persistência (dias de antes não somam com os de depois)
 
 
-def _temporal_steps(bundle_dir: Path, df):
+def _temporal_steps(bundle_dir: Path, df, todos_sensores: bool = False):
+    """Passos temporais do pipeline.json do bundle; `todos_sensores` pula o select_features (o M8 usa sensores
+    que o modelo não usa, como as temperaturas do motor)."""
     sys.path.insert(0, str(bundle_dir.resolve().parents[2]))
     import simpred_inference as si
     for st in json.loads((bundle_dir / "pipeline.json").read_text()):
+        if todos_sensores and st["step"] == "select_features":
+            continue
         if st["step"] in si._STEPS_TEMPORAIS:
             df = si._STEPS_TEMPORAIS[st["step"]](df, **{k: v for k, v in st.items() if k != "step"})
     return df
@@ -410,6 +485,46 @@ def ks_daily_fires(dados_csv: Path, bundle_dir: Path) -> list:
     return ks_daily(dados_csv, bundle_dir)[1]
 
 
+# ═══ M8 — nível de temperatura de mancal descontada a estação (ResidualLevelDetector, drift/residuo.py) ═══
+# O KS bruto compara um dia com o ano inteiro; em temperatura, a estação deixa o limite perto de 1 e um degrau no meio
+# do ano passa batido (B-8802B, mancal LA, 28/03/2026). O M8 monitora o resíduo de uma regressão da temperatura contra
+# sensores que carregam estação e carga. Calibração em residual_ref.json no bundle (--make-residual-ref).
+# B-8802B: dispara 4 dias depois do degrau, 0 disparos em 2025. B-4064A: mudança pós-reparo em ~2,5 dias, 0 falsos.
+
+
+def make_residual_ref(dados_csv: Path, bundle_dir: Path, alvos: list[str], preditores: list[str],
+                      ref_start=None, ref_end=None) -> Path:
+    """Calibra o M8 (um detector por alvo) na janela normal do treino e grava residual_ref.json no bundle."""
+    alarm = json.loads((bundle_dir / "alarm.json").read_text())
+    nw = alarm.get("threshold_calibration", {}).get("normal_window", {})
+    ref_start = ref_start or nw.get("start"); ref_end = ref_end or nw.get("end")
+    if not (ref_start and ref_end):
+        raise SystemExit("bundle sem threshold_calibration.normal_window — passe --ref-start/--ref-end")
+    df = _sem_congelado(bundle_dir, _temporal_steps(bundle_dir, si_carregar(bundle_dir, dados_csv), todos_sensores=True))
+    ref = df[(df.index >= pd.Timestamp(ref_start)) & (df.index <= pd.Timestamp(ref_end))]
+    dets = []
+    for alvo in alvos:
+        det = ResidualLevelDetector(alvo, preditores).fit(ref)
+        print(f"M8 {alvo}: R² {det.r2:.2f}, faixa normal do resíduo {det.band[0]:.1f} a {det.band[1]:.1f}"
+              + ("   [aviso: R² < 0,5, a regressão explica pouco o sensor; prefira deixá-lo só no M6]" if det.r2 < 0.5 else ""))
+        dets.append(det.to_dict())
+    path = bundle_dir / "residual_ref.json"
+    path.write_text(json.dumps({"reference_window": [str(ref_start), str(ref_end)], "detectors": dets}, indent=1, ensure_ascii=False))
+    print(f"residual_ref.json gravado em {path}  (referência {ref_start} → {ref_end}, {len(ref)} obs)")
+    return path
+
+
+def residual_fires(dados_csv: Path, bundle_dir: Path) -> list:
+    """Disparos do M8 na série: [(dia, [sensor])]."""
+    cfg = json.loads((bundle_dir / "residual_ref.json").read_text())
+    df = _sem_congelado(bundle_dir, _temporal_steps(bundle_dir, si_carregar(bundle_dir, dados_csv), todos_sensores=True))
+    fires = []
+    for d in cfg["detectors"]:
+        _, disp = ResidualLevelDetector.from_dict(d).scan(df)
+        fires += [(t, [d["target"]]) for t in disp]
+    return sorted(fires)
+
+
 def si_carregar(bundle_dir: Path, dados_csv: Path):
     sys.path.insert(0, str(bundle_dir.resolve().parents[2]))
     import simpred_inference as si
@@ -418,8 +533,8 @@ def si_carregar(bundle_dir: Path, dados_csv: Path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--inferencia", required=True, help="CSV gerado pelo script de deploy (<equip>_inferencia.csv)")
-    ap.add_argument("--alarm", required=True, help="alarm.json do bundle (fonte de mean_normal = μ do treino)")
+    ap.add_argument("--inferencia", default=None, help="CSV gerado pelo script de deploy (<equip>_inferencia.csv)")
+    ap.add_argument("--alarm", default=None, help="alarm.json do bundle (fonte de mean_normal = μ do treino)")
     ap.add_argument("--freq", default="W", help="frequência de agregação pandas (default W = semanal)")
     ap.add_argument("--csv", default=None, help="salvar a tabela semanal neste CSV")
     ap.add_argument("--png", default=None, help="salvar figura (alarme %% e erro relativo por semana)")
@@ -427,11 +542,22 @@ def main():
     ap.add_argument("--dados", default=None, help="CSV BRUTO de entrada do deploy (habilita M5 = saturação do clip, M6 = KS diário e M7 = dado congelado)")
     ap.add_argument("--bundle", default=None, help="pasta do bundle (pipeline.json + clip_bounds.json); usa o simpred_inference.py do pacote")
     ap.add_argument("--make-drift-ref", action="store_true", help="só calibra e grava drift_ref.json no bundle (usa --dados + --bundle) e sai")
+    ap.add_argument("--make-residual-ref", action="store_true",
+                    help="só calibra e grava residual_ref.json (M8) no bundle (usa --dados + --bundle + --alvos + --preditores) e sai")
+    ap.add_argument("--alvos", default=None, help="M8: temperaturas a monitorar, separadas por vírgula (ex.: 'Temperatura Bomba LA')")
+    ap.add_argument("--preditores", default=None, help="M8: sensores que explicam o alvo (estação e carga), separados por vírgula")
     ap.add_argument("--ref-start", default=None); ap.add_argument("--ref-end", default=None)
     args = ap.parse_args()
 
     if args.make_drift_ref:
         make_drift_ref(Path(args.dados), Path(args.bundle), args.ref_start, args.ref_end); return 0
+    if args.make_residual_ref:
+        if not (args.alvos and args.preditores):
+            raise SystemExit("--make-residual-ref precisa de --alvos e --preditores")
+        make_residual_ref(Path(args.dados), Path(args.bundle), [a.strip() for a in args.alvos.split(",")],
+                          [p.strip() for p in args.preditores.split(",")], args.ref_start, args.ref_end); return 0
+    if not (args.inferencia and args.alarm):
+        ap.error("--inferencia e --alarm são obrigatórios para monitorar")
 
     res = pd.read_csv(args.inferencia, index_col=0, parse_dates=True).sort_index()
     res["is_anomaly"] = res["is_anomaly"].astype(str).str.lower().isin(["true", "1"])
@@ -443,12 +569,14 @@ def main():
         print(f"[aviso] alarm.json sem threshold_calibration.mean_normal — usando mediana do 1º mês ({mu_ref:.4f}) como μ de referência")
 
     w = weekly_table(res, mu_ref, args.freq)
-    m6_fires = []
+    m6_fires, m8_fires = [], []
     if args.dados and args.bundle:
         w = w.join(clip_saturation(Path(args.dados), Path(args.bundle), args.freq))
         w = w.join(frozen_weekly(Path(args.dados), Path(args.bundle), args.freq))
         if (Path(args.bundle) / "drift_ref.json").exists():
             m6_fires = ks_daily_fires(Path(args.dados), Path(args.bundle))
+        if (Path(args.bundle) / "residual_ref.json").exists():
+            m8_fires = residual_fires(Path(args.dados), Path(args.bundle))
     ev = evaluate(w)
     # M6: disparo de KS nas últimas 4 semanas eleva a pelo menos AMARELO (investigar)
     recentes = [f for f in m6_fires if f[0] >= res.index.max() - pd.Timedelta(days=28)]
@@ -456,6 +584,14 @@ def main():
         ev["status"] = "amarelo"
     for t, sens in recentes:
         ev["reasons"].append(f"M6 (KS diário): drift detectado via {', '.join(sens)} em {t:%d/%m/%Y}")
+    # M8: nível de temperatura fora do normal (estação descontada) nas últimas 4 semanas → pelo menos AMARELO
+    recentes8 = [f for f in m8_fires if f[0] >= res.index.max() - pd.Timedelta(days=28)]
+    if recentes8 and ev["status"] == "verde":
+        ev["status"] = "amarelo"
+    for sens in sorted({s for _, ss in recentes8 for s in ss}):
+        dias = [t for t, ss in m8_fires if sens in ss]
+        primeiro = next(t for t in reversed(dias) if not any(pd.Timedelta(0) < t - u <= pd.Timedelta(days=28) for u in dias))
+        ev["reasons"].append(f"M8 (resíduo): nível de {sens} fora do normal, estação descontada; disparos repetidos desde {primeiro:%d/%m/%Y}")
 
     pd.set_option("display.width", 160)
     print(f"Equipamento: {Path(args.inferencia).stem}   μ treino = {mu_ref:.4f}   limiar alarme = {alarm['threshold']:.4f}")
@@ -467,6 +603,11 @@ def main():
         for t, sens in m6_fires[-5:]: print(f"    {t:%d/%m/%Y %H:%M}  via {', '.join(sens)}")
     elif args.dados and args.bundle and (Path(args.bundle) / "drift_ref.json").exists():
         print("\nM6 (KS diário): nenhum disparo na série ✓")
+    if m8_fires:
+        print(f"\nM8 (nível no resíduo) — {len(m8_fires)} disparo(s) na série; o 1º e os últimos:")
+        for t, sens in ([m8_fires[0]] + m8_fires[-4:] if len(m8_fires) > 5 else m8_fires): print(f"    {t:%d/%m/%Y}  {', '.join(sens)}")
+    elif args.dados and args.bundle and (Path(args.bundle) / "residual_ref.json").exists():
+        print("\nM8 (nível no resíduo): nenhum disparo na série ✓")
     cor = {"verde": "VERDE — operação normal, nada a fazer", "amarelo": "AMARELO — investigar com a operação (manutenção? regime novo? sensor?); NÃO retreinar ainda",
            "vermelho": "VERMELHO — drift sustentado: aplicar checklist drift × degradação e, confirmado, abrir retreino"}
     print(f"\n>>> STATUS: {cor[ev['status']]}")
