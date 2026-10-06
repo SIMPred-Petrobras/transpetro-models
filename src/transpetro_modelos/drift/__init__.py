@@ -3,12 +3,13 @@ investigação, bateria de validação e retreino com portões.
 
     detectors  interface comum (BaseDriftDetector) e detectores; o adotado é CalibratedKSDetector
     benchmark  atraso de detecção e falsos alarmes contra uma mudança conhecida
-    monitor    semáforo semanal (M1–M6) sobre a saída da inferência; gera o drift_ref.json
+    monitor    semáforo semanal (M1–M7, M7 = dado congelado) sobre a saída da inferência; gera o drift_ref.json
     report     relatório de investigação quando o monitor sai do verde
     battery    bateria de validação de um bundle (aprova/reprova)
     retrain    pipeline de retreino com portão humano e de dados
     ciclo      simulação do ciclo detectar → quarentena → recalibrar → monitorar sobre uma série
     acumulativo retreino acumulativo do modelo após uma mudança (provisório que amadurece)
+    residuo    mudança de nível descontada a estação (resíduo de um modelo de comportamento normal)
 
 Política: docs/politica_retreino.md · arquitetura: docs/deteccao_drift.md
 """

@@ -12,7 +12,8 @@ Tudo em `src/transpetro_modelos/drift/`; em `scripts/` ficam só os comandos, co
 |---|---|---|
 | `drift/detectors.py` | — | `BaseDriftDetector` (`update`/`reset`, um ponto por vez) + KS por p-valor, PSI, Page–Hinkley, CUSUM, ADWIN-lite e **`CalibratedKSDetector`** (o adotado) |
 | `drift/benchmark.py` | — | atraso até detectar e falsos alarmes contra uma mudança conhecida |
-| `drift/monitor.py` | `scripts/monitor_drift.py` | semáforo semanal (M1–M5) + M6 com o `CalibratedKSDetector`; `--make-drift-ref` calibra e grava o `drift_ref.json` no bundle |
+| `drift/monitor.py` | `scripts/monitor_drift.py` | semáforo semanal (M1–M5) + M6 com o `CalibratedKSDetector` + M7 dado congelado; `--make-drift-ref` calibra e grava o `drift_ref.json` no bundle |
+| `drift/residuo.py` | — | `ResidualLevelDetector`: mudança de nível de uma temperatura, descontada a estação (resíduo de um modelo de comportamento normal) |
 | `drift/report.py` | `scripts/drift_report.py` | relatório de investigação quando o monitor sai do verde |
 | `drift/battery.py` | `scripts/battery.py` | bateria de validação de um bundle (aprova/reprova) |
 | `drift/retrain.py` | `scripts/retrain_pipeline.py` | retreino com portão humano e de dados |
@@ -44,10 +45,26 @@ vêm intercalados. Com a regra de dias seguidos, o atraso dependia de onde cada 
 de 3,4 a 75,7 dias entre 24 alinhamentos possíveis. Com 3 de 5, de 3,4 a 8,4 dias (mediana
 3,9), e zero falso disparo no controle sem drift (jul–dez/2025) em todos os alinhamentos.
 
+A referência é resumida por quantis (`sampling="quantile"`, usado pelo monitor), não por um sorteio: o limite e a
+amostra guardada no `drift_ref.json` não dependem de semente nem do tamanho. Na varredura, uma parada de mais de 3
+dias zera a persistência (`scan(..., reset_gap="3D")`). Trechos de dado congelado (3+ sensores com o mesmo valor por
+12 h+, falha de aquisição) ficam fora da calibração e da varredura e viram o aviso M7.
+
 O estado calibrado usa o mesmo formato do `drift_ref.json` gravado nos bundles
 (`monitor_drift.py --make-drift-ref`): `CalibratedKSDetector.from_drift_ref(...)` reproduz
 exatamente os disparos do monitor (verificado no B-8802B: 88 de 88 no caso de drift, 3 de 3
 na produção).
+
+## Temperaturas: o detector no resíduo
+
+O KS compara um dia com a referência inteira (o ano todo). Em temperatura de mancal, que tem estação forte, todo dia
+já parece diferente do ano e o limite vai para perto de 1: no B-8802B, um degrau de −6 °C no mancal LA em 28/03/2026
+não gerou disparo robusto. O `ResidualLevelDetector` ajusta na referência uma regressão da temperatura contra as
+temperaturas do motor, a corrente e as pressões, e monitora a mediana diária do resíduo (faixa p0,5–p99,5 da
+referência, 3 de 5 dias). No B-8802B ele dispara 4 dias depois do degrau, sem disparo em 2025; no B-4064A acha a
+mudança pós-reparo em ~2,5 dias e não dispara com referência de só 4 meses (o KS dá 2 falsos, pela estação). Só
+serve quando a regressão explica o sensor (no mancal LNA do B-8802B, R² 0,32: fica no KS). Ainda não está no monitor.
+Análise: `notebooks/drift/mudanca_conceito_B-8802B.ipynb`.
 
 ## O que não foi incorporado
 
