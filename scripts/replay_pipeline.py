@@ -16,7 +16,7 @@ No worker, o dado de treino vem do Dataset do equipamento e os CSVs que a bateri
 Dataset `transpetro-b-8802b-bateria-csv`, gravados nos mesmos caminhos do pacote de deploy. O resultado (bundles,
 baterias, resumo) sobe como artifact `replay` e as métricas por etapa aparecem em Scalars.
 """
-import argparse, json, shutil, subprocess, sys, zipfile
+import argparse, json, os, shutil, subprocess, sys, zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -37,34 +37,37 @@ def _baixar_csvs():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--equipment", required=True)
-    ap.add_argument("--inicio", required=True, help="início do normal novo (data do disparo confirmado)")
+    # valores padrão (não obrigatórios): no worker do ClearML o script roda sem argumentos e lê os da task
+    ap.add_argument("--equipment", default="B-8802B-2025")
+    ap.add_argument("--inicio", default="2025-01-06", help="início do normal novo (data do disparo confirmado)")
     ap.add_argument("--meses", type=int, default=12)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", default="results/replay_pipeline")
     ap.add_argument("--remote", action="store_true", help="enfileira no ClearML e sai")
     ap.add_argument("--queue", default="default")
     ap.add_argument("--baixar", default=None, help="id da task do ClearML: baixa o artifact `replay` para --out e sai")
     ap.add_argument("--clearml-task-name", default="replay-pipeline-b8802b")
     a = ap.parse_args()
-    out = ROOT / a.out
-
     if a.baixar:
         from clearml import Task
+        out = ROOT / a.out
         z = Task.get_task(task_id=a.baixar).artifacts["replay"].get_local_copy(extract_archive=False)
         out.mkdir(parents=True, exist_ok=True); zipfile.ZipFile(z).extractall(out)
         print(f"resultado da task {a.baixar} extraído em {out}"); return 0
 
     task = logger = None
-    if a.remote:
+    no_worker = bool(os.environ.get("CLEARML_TASK_ID"))      # o agent do ClearML define esta variável
+    if a.remote or no_worker:
         from clearml import Task
         Task.add_requirements("pyarrow"); Task.add_requirements("torch", package_version="")
         task = Task.init(project_name="Transpetro", task_name=a.clearml_task_name, output_uri=True, reuse_last_task_id=False)
         task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
-        task.connect(vars(a))
+        task.connect(vars(a))                           # no worker, preenche `a` com os parâmetros da task
+        a.remote = True
         task.execute_remotely(queue_name=a.queue)       # daqui para baixo, só no worker
         logger = task.get_logger()
         _baixar_csvs()
 
+    out = ROOT / a.out
     out.mkdir(parents=True, exist_ok=True)
     ini = pd.Timestamp(a.inicio)
     linhas = []
