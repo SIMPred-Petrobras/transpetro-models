@@ -8,6 +8,10 @@ Este guia é para o time de integração. Ele cobre duas coisas:
 
 O monitor **não muda nada na inferência**: é um passo a mais, depois dela, usando o CSV que ela já gera.
 
+**Na inferência, o que vai para a operação é a coluna `alerta`** de `prever()`: o alarme que durou 1 hora ou mais.
+Chame `prever(..., df_bruto=df)` com o mesmo CSV bruto da entrada, para os minutos de parada ficarem fora do alarme
+(detalhes no `MIGRACAO.md` de cada equipamento).
+
 ---
 
 ## A. O monitor semanal
@@ -108,11 +112,14 @@ perigoso: o monitor também reage a uma degradação real, e retreinar nela colo
   ano). É o caso do B-8802B-2025, treinado com 2025 inteiro. Roda pelo pipeline com portão
   (`scripts/retrain_pipeline.py --operacao-confirmou`), que só aceita janela confirmada pela operação e entrega o
   bundle aprovado pela bateria (falso positivo fora do treino, falha real de 2022, falha simulada).
-- **Antes dos 12 meses (em validação):** a partir de 1 mês de dado pode entrar um **modelo provisório**,
-  retreinado todo mês com tudo o que acumulou, até virar o definitivo. No teste do B-8802B ele quase não dá alarme
-  falso desde o 1º mês, mas só detecta falha de forma confiável a partir de ~8 meses. Os alertas de um provisório
+- **Antes dos 12 meses: modelo provisório.** Com **1 mês** e ≥ 300 h de dado do normal novo, o time de modelos
+  treina um provisório (`scripts/retrain_pipeline.py --provisorio`) e o refaz **todo mês** com tudo o que acumulou,
+  até virar o definitivo aos 12 meses. Ele passa por uma bateria própria (alarme falso baixo na validação, alerta
+  antes da falha real de 2022 e detecção da falha simulada) e vem marcado como provisório no `alarm.json`; o monitor
+  avisa isso na saída. No teste do B-8802B, o provisório de 1 mês ficou 0 % do tempo em alarme no mês seguinte
+  (o modelo antigo, 1,5 %), mas a detecção de falha só ficou confiável com ~8 meses: os alertas de um provisório
   valem **com ressalva**. Para a integração, isso significa receber um bundle novo por mês nesse período, cada um
-  com o mesmo passo de sombra.
+  com o mesmo passo de sombra (que pode ser mais curto, 1 a 2 semanas, já que o próximo vem no mês seguinte).
 - **Os detectores andam junto com o modelo.** Todo bundle novo vem com `drift_ref.json` (M6) e `residual_ref.json`
   (M8) calibrados no **mesmo período** do treino do modelo, porque o monitor responde se aquele modelo ainda descreve
   o equipamento. A referência não é uma janela deslizante: uma janela que acompanha os últimos meses absorveria a
@@ -140,7 +147,20 @@ python3 monitor_drift.py --make-residual-ref --dados <CSV bruto> --bundle <pasta
 ```
 
 `scripts/retrain_pipeline.py` faz as duas calibrações sozinho em todo bundle novo (o M8 herda alvos e preditores do
-bundle em produção). Política completa: `docs/politica_retreino.md`. Análise que embasa o M7 e o M8:
+bundle em produção), e grava no `alarm.json` a persistência no tempo e a regra de 1 hora (`persistence_mode`,
+`min_alert_hours`).
+
+Retreino, definitivo e provisório:
+
+```bash
+# definitivo: 12 meses do normal novo, com held-out depois do treino
+python scripts/retrain_pipeline.py --equipment <EQUIP> --train-start <início do normal novo> --train-end <+12 meses> \
+    --heldout-end <fim do held-out> --out <pasta> --operacao-confirmou
+
+# provisório: a partir de 1 mês; rodar de novo todo mês com o mesmo --train-start e o --train-end avançado
+python scripts/retrain_pipeline.py --equipment <EQUIP> --provisorio --train-start <início do normal novo> \
+    --train-end <hoje> --out <pasta> --operacao-confirmou
+``` Política completa: `docs/politica_retreino.md`. Análise que embasa o M7 e o M8:
 `notebooks/drift/mudanca_conceito_B-8802B.ipynb`.
 
 ## Situação atual do B-8802B
@@ -149,3 +169,4 @@ bundle em produção). Política completa: `docs/politica_retreino.md`. Análise
   28/03/2026, logo depois de uma parada da bomba. O M6 não dispara. Pergunta em aberto à operação: o que foi feito
   nas paradas de 17/03 (~00:30 às 09:30) e de 27/03/2026 (~08:30 às 14:30)?
 - **Dado congelado** (M7) em 02/01/2025, 15–23/05/2025 e 22/02–04/03/2026: vale a instrumentação verificar.
+- O `drift_ref.json` do bundle foi recalibrado em out/2026 (quantis, sem o dado congelado na referência).

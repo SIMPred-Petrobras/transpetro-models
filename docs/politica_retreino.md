@@ -134,6 +134,15 @@ responder:
 7. **Sombra por 4 semanas**: os dois modelos rodam em paralelo; troca-se quando o novo fica verde no
    monitor e os alarmes divergentes foram entendidos.
 
+**Modelo provisório (antes dos 12 meses).** Esperar 12 meses com o modelo desatualizado é caro. Com ≥ 1 mês e
+≥ 300 h do normal novo, `scripts/retrain_pipeline.py --provisorio` treina um provisório com a mesma receita e o refaz
+todo mês com tudo o que acumulou, até o definitivo. Bateria provisória: FP ≤ 0,5 % na validação (fim da janela),
+alerta ≥ 0,5 d antes da falha de 2022 e falha sintética (no último mês da janela) detectada; o alarme no normal de
+2022 é só informativo, porque 2022 é o normal de antes do reparo. Teste no B-8802B: o provisório de 1 mês ficou 0 % em
+alarme no mês seguinte (o modelo de 2022, 1,5 %); no experimento acumulativo, a detecção de falha só ficou confiável
+com ~8 meses (`notebooks/drift/retreino_acumulativo_explicado_B-8802B.ipynb`). Os alertas do provisório valem com
+ressalva, e ele vem marcado como provisório no `alarm.json`.
+
 ## 6. Revisão anual (mesmo tudo verde)
 
 Uma vez por ano, por equipamento: rodar o monitor sobre os 12 meses, repetir a bateria de sensibilidade

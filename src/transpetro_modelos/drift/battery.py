@@ -27,8 +27,9 @@ BATTERY = {
         "data_new": DEP / "B-8802B-2025/dados/2025_2026/data_2025-01-01_2026-08-10_raw.csv",
         "train_end": "2026-01-01", "heldout_end": "2026-06-01",
         "anchors": {  # episódios de prioridade ALTA (docs/justificativa_alarmes_b8802b_2025.md); tolerância ±2 h
+            # 10/08/26 saiu: contando só medição real (sem os minutos de parada preenchidos pelo ffill) o alarme
+            # durou 40 min e não vira alerta pela regra de 1 h (notebooks/drift/apresentacao_simpred_B-8802B.ipynb)
             "ep2 17/01/26 vib LA+LNA": ("2026-01-17 21:30", "2026-01-17 22:40"),
-            "ep4 10/08/26 sucção/vib": ("2026-08-10 12:45", "2026-08-10 16:25"),
         },
         "cross_era": {
             "csv": DEP / "B-8802B/dados", "csv_glob": "*_raw.csv",
@@ -42,12 +43,23 @@ BATTERY = {
             "min_lead_h_100": 20.0, "require_50_detected": True,
         },
         "criteria": {"max_fp_heldout_pct": 0.05, "max_fp_post_pct": 0.30},
+        # modelo provisório (retreino com 1 a 11 meses do normal novo): sem dado depois do treino para medir FP, e
+        # sensibilidade ainda imatura (no B-8802B, confiável só com ~8 meses) → critérios mais brandos, alertas com ressalva
+        # O alarme no normal de 2022 é só informativo aqui: 2022 é o normal de ANTES do reparo (outro conceito), e um
+        # modelo de poucos meses do normal novo estranha esse período (no B-8802B, 2–6 % com 1 mês). O FP que importa,
+        # no normal atual, é o da validação.
+        "criteria_provisional": {"max_fp_val_pct": 0.5, "min_lead_days_2022": 0.5},
     },
 }
 
 
 def score(bundle: Path, df: pd.DataFrame) -> pd.DataFrame:
-    return si.prever(bundle, si.carregar_modelo(bundle), si.preprocessar(bundle, df))
+    """Como no equipamento: com o CSV bruto (paradas fora da persistência) e a coluna `alerta` (regra de 1 h,
+    quando o alarm.json a liga), que é o que chega à operação."""
+    r = si.prever(bundle, si.carregar_modelo(bundle), si.preprocessar(bundle, df), df_bruto=df)
+    if "alerta" in r.columns:
+        r["is_anomaly"] = r["alerta"]
+    return r
 
 
 def inject(df: pd.DataFrame, sig: dict, t0: pd.Timestamp, ramp_h: int, hold_h: int, scale: float) -> pd.DataFrame:
@@ -61,7 +73,12 @@ def inject(df: pd.DataFrame, sig: dict, t0: pd.Timestamp, ramp_h: int, hold_h: i
 
 
 def run_battery(equipment: str, bundle: Path | None = None, data_new: Path | None = None,
-                train_end: str | None = None, heldout_end: str | None = None, verbose=True) -> dict:
+                train_end: str | None = None, heldout_end: str | None = None, verbose=True,
+                provisional: bool = False, val_start: str | None = None, synthetic_t0: str | None = None) -> dict:
+    """Bateria completa (modelo definitivo) ou, com `provisional=True`, a versão do modelo provisório: FP medido na
+    validação (`val_start` → `train_end`), sem âncoras nem período posterior, falha sintética em `synthetic_t0`."""
+    if provisional:
+        return _run_battery_provisional(equipment, bundle, data_new, val_start, train_end, synthetic_t0, verbose)
     cfg = BATTERY[equipment]
     bundle = Path(bundle or cfg["bundle"]); data_new = Path(data_new or cfg["data_new"])
     train_end = pd.Timestamp(train_end or cfg["train_end"]); heldout_end = pd.Timestamp(heldout_end or cfg["heldout_end"])
@@ -124,6 +141,53 @@ def run_battery(equipment: str, bundle: Path | None = None, data_new: Path | Non
     P("\nCritérios:")
     for k, v in checks.items(): P(f"  {'✓' if v else '✗'} {k}")
     P(f"\n>>> {'APROVADO' if out['approved'] else 'REPROVADO'}")
+    return out
+
+
+def _cross_era(bundle: Path, ce: dict) -> dict:
+    raw_old = si.carregar_dados(next(Path(ce["csv"]).rglob(ce["csv_glob"])))
+    f_old = score(bundle, raw_old)["is_anomaly"]
+    failure, ramp0 = pd.Timestamp(ce["failure"]), pd.Timestamp(ce["ramp_start"])
+    ramp = f_old[(f_old.index >= ramp0) & (f_old.index < failure)]
+    first = ramp[ramp].index.min() if ramp.any() else None
+    return {"lead_days": (failure - first).total_seconds() / 86400 if first is not None else None,
+            "normal_rate_pct": 100 * f_old[f_old.index < ramp0].mean(), "first_alarm": str(first)}
+
+
+def _run_battery_provisional(equipment, bundle, data_new, val_start, train_end, synthetic_t0, verbose) -> dict:
+    cfg = BATTERY[equipment]; cr = cfg["criteria_provisional"]; sy = cfg["synthetic"]
+    data_new = Path(data_new or cfg["data_new"]); bundle = Path(bundle)
+    P = lambda *a: print(*a, flush=True) if verbose else None
+    P(f"Bateria PROVISÓRIA — {equipment}\n  bundle: {bundle}\n")
+    raw = si.carregar_dados(data_new)
+    fl = score(bundle, raw)["is_anomaly"]
+    va = fl[(fl.index >= pd.Timestamp(val_start)) & (fl.index < pd.Timestamp(train_end))]
+    out = {"fp_val_pct": 100 * va.mean()}
+    P(f"[1] FP na validação (fim da janela de treino): {out['fp_val_pct']:.3f}%")
+    out["cross_era"] = _cross_era(bundle, cfg["cross_era"])
+    P(f"[2] falha real de 2022: antecedência {out['cross_era']['lead_days'] and round(out['cross_era']['lead_days'], 2)} d  "
+      f"normal pré-rampa {out['cross_era']['normal_rate_pct']:.2f}%")
+    t0 = pd.Timestamp(synthetic_t0); tf = t0 + pd.Timedelta(hours=sy["ramp_h"])
+    base = fl[(fl.index >= t0) & (fl.index <= tf + pd.Timedelta(hours=sy["hold_h"]))]
+    rI = score(bundle, inject(raw, sy["signature"], t0, sy["ramp_h"], sy["hold_h"], 1.0))
+    w = rI.loc[t0: tf + pd.Timedelta(hours=sy["hold_h"]), "is_anomaly"]
+    fi = w[w].index.min() if w.any() else None
+    out["synthetic"] = {"t0": str(t0), "janela_contaminada": bool(base.any()),
+                        "100": (tf - fi).total_seconds() / 3600 if fi is not None else None}
+    P(f"[3] sintética 100% em {t0:%d/%m/%Y}: " + ("janela contaminada (já alarmava sem a falha)" if base.any() else
+      ("não detecta" if fi is None else f"{out['synthetic']['100']:.1f} h antes do fim da rampa")))
+    ce = out["cross_era"]
+    checks = {
+        f"FP na validação ≤ {cr['max_fp_val_pct']}%": out["fp_val_pct"] <= cr["max_fp_val_pct"],
+        f"falha de 2022 ≥ {cr['min_lead_days_2022']} d antes": ce["lead_days"] is not None
+            and ce["lead_days"] >= cr["min_lead_days_2022"],
+        "sintética 100% detectada antes do fim da rampa": not base.any() and out["synthetic"]["100"] is not None
+            and out["synthetic"]["100"] > 0,
+    }
+    out["checks"] = checks; out["approved"] = all(checks.values())
+    P("\nCritérios (provisório):")
+    for k, v in checks.items(): P(f"  {'✓' if v else '✗'} {k}")
+    P(f"\n>>> {'APROVADO (provisório: alertas com ressalva)' if out['approved'] else 'REPROVADO'}")
     return out
 
 

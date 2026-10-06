@@ -7,6 +7,15 @@ Pipeline de retreino (estágio 3 da política de drift) — executa a receita va
 
 NUNCA roda sem `--operacao-confirmou` (registro de que a operação confirmou que a janela é operação normal).
 
+Modelo PROVISÓRIO (`--provisorio`): depois de uma mudança confirmada, não se espera 12 meses com o modelo desatualizado.
+Com >= 1 mês e >= 300 h do normal novo treina-se um provisório, refeito todo mês com tudo o que acumulou (mesmo
+--train-start, --train-end avançando um mês), até virar o definitivo com 12 meses. Diferenças: FP medido na validação
+(fim da janela; não há dado depois), falha sintética numa data escolhida no último mês da janela, bateria provisória
+(critérios mais brandos) e o bundle marcado como provisório no alarm.json. No B-8802B o provisório quase não deu alarme
+falso desde o 1º mês, mas só detectou falha de forma confiável com ~8 meses: os alertas dele valem com ressalva.
+  python scripts/retrain_pipeline.py --equipment B-8802B-2025 --provisorio --train-start 2025-01-06 \
+      --train-end 2025-02-06 --out results/provisorio/m01 --operacao-confirmou
+
 Ex. (replay do retreino do B-8802B):
   python scripts/retrain_pipeline.py --equipment B-8802B-2025 --train-start 2025-01-01 --train-end 2026-01-01 \
       --heldout-end 2026-06-01 --out results/replay/retreino --operacao-confirmou
@@ -35,11 +44,28 @@ Y_ALARM, Y_ATT, K_P, N_P = 6.5, 4.0, 15, 20
 def kofn(f, k=K_P, n=N_P): return (f.astype(int).rolling(n, min_periods=n).sum() >= k).fillna(False)
 
 
+def _t0_sintetica(raw: pd.DataFrame, cfg, ts, te, sy) -> pd.Timestamp:
+    """Data da falha sintética do provisório: a mais tarde, no último mês da janela, com a bomba operando >= 80 %
+    do tempo da injeção (rampa + platô)."""
+    run = next((s for s in cfg.pre_split_steps if s["step"] == "filter_running"), None)
+    dur = pd.Timedelta(hours=sy["ramp_h"] + sy["hold_h"])
+    for k in range(0, 31):
+        t0 = (te - dur - pd.Timedelta(days=k)).normalize()
+        if t0 < ts:
+            break
+        w = raw.loc[t0: t0 + dur]
+        if run is None or (len(w) and (w[run["column"]] > run["threshold"]).mean() >= 0.8):
+            return t0
+    raise SystemExit("não há janela com a bomba operando no último mês para injetar a falha sintética")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--equipment", required=True)
     ap.add_argument("--train-start", required=True); ap.add_argument("--train-end", required=True)
-    ap.add_argument("--heldout-end", required=True)
+    ap.add_argument("--heldout-end", default=None, help="fim do held-out (modelo definitivo; o provisório não usa)")
+    ap.add_argument("--provisorio", action="store_true",
+                    help="modelo provisório: >= 1 mês do normal novo, FP na validação, bateria provisória")
     ap.add_argument("--out", required=True)
     ap.add_argument("--operacao-confirmou", action="store_true",
                     help="registro do portão humano: operação confirmou que a janela de treino é operação normal")
@@ -47,7 +73,10 @@ def main():
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     cfg = EQUIPMENT_CONFIGS[a.equipment]
-    ts, te, he = pd.Timestamp(a.train_start), pd.Timestamp(a.train_end), pd.Timestamp(a.heldout_end)
+    if not a.provisorio and not a.heldout_end:
+        raise SystemExit("--heldout-end é obrigatório no modelo definitivo")
+    ts, te = pd.Timestamp(a.train_start), pd.Timestamp(a.train_end)
+    he = te if a.provisorio else pd.Timestamp(a.heldout_end)
 
     # ── check (portão) ──────────────────────────────────────────────────────────
     if not a.operacao_confirmou:
@@ -57,7 +86,12 @@ def main():
     tr_idx = pre[(pre.index >= ts) & (pre.index < te)]
     horas = len(tr_idx) / 12; meses = (te - ts).days / 30.4
     print(f"[check] janela {ts.date()} → {te.date()}: {meses:.1f} meses, {horas:.0f} h de operação", flush=True)
-    if meses < 11.5 or horas < 4000:
+    if a.provisorio:
+        if meses < 0.9 or horas < 300:
+            raise SystemExit(f"PORTÃO: janela insuficiente para o provisório (mínimos: 1 mês e 300 h; tem {meses:.1f} m / {horas:.0f} h).")
+        if meses >= 11.5 and horas >= 4000:
+            print("[check] a janela já tem 12 meses: rode o modelo DEFINITIVO (sem --provisorio)", flush=True)
+    elif meses < 11.5 or horas < 4000:
         raise SystemExit(f"PORTÃO: janela insuficiente (mínimos: 12 meses e 4000 h; tem {meses:.1f} m / {horas:.0f} h).")
 
     # ── train: grade local, ranking por FP held-out com a régua de DEPLOY ──────
@@ -70,7 +104,9 @@ def main():
     # sensibilidade rápida no ranking (lição das buscas anteriores: menor FP sozinho seleciona o modelo mais CEGO):
     # injeta a falha sintética a 100% e mede a antecedência com a mesma régua — a bateria continua sendo a autoridade.
     sy = battery.BATTERY[a.equipment]["synthetic"]
-    t0 = pd.Timestamp(sy["t0"]); tf = t0 + pd.Timedelta(hours=sy["ramp_h"])
+    t0 = _t0_sintetica(raw, cfg, ts, te, sy) if a.provisorio else pd.Timestamp(sy["t0"])
+    tf = t0 + pd.Timedelta(hours=sy["ramp_h"])
+    print(f"[check] falha sintética injetada em {t0:%d/%m/%Y %H:%M}", flush=True)
     rawI = battery.inject(raw, sy["signature"], t0, sy["ramp_h"], sy["hold_h"], 1.0)
     preI, _, _ = run_preprocessing(rawI, cfg.pre_split_steps)
     XI = run_preprocessing(preI[(preI.index >= t0 - pd.Timedelta(days=2)) & (preI.index <= tf + pd.Timedelta(hours=sy["hold_h"] + 12))],
@@ -90,23 +126,29 @@ def main():
             e = pd.Series(compute_vae_errors(m, full), index=full.index)
             mtr = e[(e.index >= ts) & (e.index < te)]; mu, sd = float(mtr.mean()), float(mtr.std())
             fl = kofn(e > mu + Y_ALARM * sd)
-            fp_ho = 100 * fl[(fl.index >= te) & (fl.index < he)].mean()
-            fp_po = 100 * fl[fl.index >= he].mean()
+            if a.provisorio:   # sem dado depois do treino: FP na validação (fim da janela, fora dos pesos)
+                fp_ho = 100 * fl[(fl.index >= va.index.min()) & (fl.index < te)].mean(); fp_po = 0.0
+            else:
+                fp_ho = 100 * fl[(fl.index >= te) & (fl.index < he)].mean()
+                fp_po = 100 * fl[fl.index >= he].mean()
             eI = pd.Series(compute_vae_errors(m, XI), index=XI.index)
             fI = kofn(eI > mu + Y_ALARM * sd); w_ = fI[(fI.index >= t0)]
             fi = w_[w_].index.min() if w_.any() else None
             synth_h = (tf - fi).total_seconds() / 3600 if fi is not None else -999.0
+            if fl[(fl.index >= t0) & (fl.index <= tf + pd.Timedelta(hours=sy["hold_h"]))].any():
+                synth_h = -999.0   # já alarma ali sem a falha: um alarme "antecipado" não mede detecção
             rank.append({"tag": tag, "model": m, "mu": mu, "sd": sd, "fp_ho": fp_ho, "fp_po": fp_po,
                          "synth_h": synth_h, "layers": layers, "latent": latent})
             print(f"[train] {tag:36s} FP held-out {fp_ho:.3f}%  posterior {fp_po:.3f}%  sintética {synth_h:.0f} h", flush=True)
     # ranking: entre os que cabem no teto de FP, maximiza sensibilidade; desempate por FP
-    fp_max = battery.BATTERY[a.equipment]["criteria"]["max_fp_heldout_pct"]
+    fp_max = (battery.BATTERY[a.equipment]["criteria_provisional"]["max_fp_val_pct"] if a.provisorio
+              else battery.BATTERY[a.equipment]["criteria"]["max_fp_heldout_pct"])
     rank.sort(key=lambda r: (r["fp_ho"] > fp_max, -r["synth_h"], r["fp_ho"], r["fp_po"]))
 
     # ── package + battery: empacota o melhor e valida; reprovou → próximo ───────
     data_csv = battery.BATTERY[a.equipment]["data_new"]
     for i, cand in enumerate(rank[: a.max_candidates], 1):
-        bdir = out / f"model_{ts.date()}_{te.date()}_VAE"
+        bdir = out / (f"model_{ts.date()}_{te.date()}_VAE" + ("_provisorio" if a.provisorio else ""))
         bdir.mkdir(exist_ok=True)
         torch.save(cand["model"].state_dict(), bdir / "model_state.pt")
         (bdir / "model_arch.json").write_text(json.dumps({"model_type": "vae", "input_dim": full.shape[1],
@@ -118,12 +160,17 @@ def main():
             "model_type": "vae", "threshold": float(cand["mu"] + Y_ALARM * cand["sd"]),
             "threshold_attention": float(cand["mu"] + Y_ATT * cand["sd"]),
             "debounce_consecutive": 6, "debounce_window": N_P, "debounce_min": K_P,
+            "persistence_mode": "time", "persistence_step": "5min", "min_alert_hours": 1.0,
             "features": list(full.columns),
             "threshold_calibration": {"method": "sigma", "mean_normal": float(cand["mu"]), "std_normal": float(cand["sd"]),
                                       "y_alarm": Y_ALARM, "y_attention": Y_ATT,
                                       "persistence": {"k": K_P, "n": N_P},
                                       "normal_window": {"start": str(ts), "end": str(te)},
-                                      "candidate": cand["tag"]}}, indent=1, ensure_ascii=False))
+                                      "candidate": cand["tag"]},
+            **({"provisional": {"months": round(meses, 1), "train_start": str(ts), "train_end": str(te),
+                                "note": "modelo provisório: alertas com ressalva; no B-8802B a detecção de falha só ficou "
+                                        "confiável com ~8 meses de dado. Retreinar todo mês até 12 meses (definitivo)."}}
+               if a.provisorio else {})}, indent=1, ensure_ascii=False))
         print(f"\n[package] candidato #{i} ({cand['tag']}) → {bdir}", flush=True)
         mon.make_drift_ref(Path(data_csv), bdir)
         # M8: herda do bundle em produção quais temperaturas monitorar e com quais preditores, e recalibra no
@@ -133,10 +180,18 @@ def main():
             m8 = json.loads(rr_atual.read_text())["detectors"]
             mon.make_residual_ref(Path(data_csv), bdir, [d["target"] for d in m8], m8[0]["predictors"])
         print(f"[battery] candidato #{i}:", flush=True)
-        res = battery.run_battery(a.equipment, bundle=bdir, train_end=str(te.date()), heldout_end=str(he.date()))
+        if a.provisorio:
+            res = battery.run_battery(a.equipment, bundle=bdir, train_end=str(te), provisional=True,
+                                      val_start=str(va.index.min()), synthetic_t0=str(t0))
+        else:
+            res = battery.run_battery(a.equipment, bundle=bdir, train_end=str(te.date()), heldout_end=str(he.date()))
         (out / f"battery_cand{i}.json").write_text(json.dumps(res, indent=1, ensure_ascii=False, default=str))
         if res["approved"]:
-            print(f"\n>>> PIPELINE CONCLUÍDO: bundle aprovado em {bdir}\n    Próximo passo: 4 semanas em SOMBRA ao lado do bundle atual antes da troca (política, seção 5).")
+            if a.provisorio:
+                print(f"\n>>> PIPELINE CONCLUÍDO: bundle PROVISÓRIO aprovado em {bdir}\n    Alertas com ressalva. "
+                      f"Próximo passo: sombra ao lado do bundle atual; daqui a 1 mês, rodar de novo com --train-end avançado.")
+            else:
+                print(f"\n>>> PIPELINE CONCLUÍDO: bundle aprovado em {bdir}\n    Próximo passo: 4 semanas em SOMBRA ao lado do bundle atual antes da troca (política, seção 5).")
             return 0
         print(f"[battery] candidato #{i} REPROVADO — tentando o próximo…\n", flush=True)
     print(">>> PIPELINE INTERROMPIDO: nenhum candidato aprovado pela bateria. Manter o bundle atual e investigar.")
