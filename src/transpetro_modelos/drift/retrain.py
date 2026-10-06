@@ -70,6 +70,7 @@ def main():
     ap.add_argument("--operacao-confirmou", action="store_true",
                     help="registro do portão humano: operação confirmou que a janela de treino é operação normal")
     ap.add_argument("--epochs", type=int, default=60); ap.add_argument("--max-candidates", type=int, default=3)
+    ap.add_argument("--from-clearml", action="store_true", help="lê o dado de treino do ClearML Dataset (worker remoto)")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     cfg = EQUIPMENT_CONFIGS[a.equipment]
@@ -81,7 +82,7 @@ def main():
     # ── check (portão) ──────────────────────────────────────────────────────────
     if not a.operacao_confirmou:
         raise SystemExit("PORTÃO: rode com --operacao-confirmou após a operação validar a janela (política, seção 4).")
-    raw = load_equipment_data(a.equipment, from_clearml=False)
+    raw = load_equipment_data(a.equipment, from_clearml=a.from_clearml)
     pre, _, _ = run_preprocessing(raw, cfg.pre_split_steps)
     tr_idx = pre[(pre.index >= ts) & (pre.index < te)]
     horas = len(tr_idx) / 12; meses = (te - ts).days / 30.4
