@@ -90,6 +90,7 @@ class CalibratedKSDetector(BaseDriftDetector):
         persistence_window: int | None = 5,
         feature_names: list[str] | None = None,
         seed: int = 0,
+        sampling: str = "random",
         *,
         samples: list[np.ndarray] | None = None,
         d_crit: list[float] | None = None,
@@ -99,6 +100,11 @@ class CalibratedKSDetector(BaseDriftDetector):
         self.k_consecutive = k_consecutive
         # None = k janelas CONSECUTIVAS; n = k janelas acima dentre as últimas n (tolera dia intercalado)
         self.persistence_window = persistence_window
+        # "random": amostra sorteada da referência (o limite muda um pouco com a semente e o tamanho);
+        # "quantile": n_reference quantis igualmente espaçados da referência inteira (determinístico)
+        if sampling not in ("random", "quantile"):
+            raise ValueError("sampling deve ser 'random' ou 'quantile'.")
+        self.sampling = sampling
 
         if samples is not None and d_crit is not None:
             self.samples = [np.asarray(v, dtype=float) for v in samples]
@@ -122,7 +128,10 @@ class CalibratedKSDetector(BaseDriftDetector):
                         f"referência de '{self.feature_names[j]}' tem {len(col)} pontos; "
                         f"são necessários pelo menos {2 * window_size} (2 janelas)."
                     )
-                sample = rng.choice(col, size=min(len(col), n_reference), replace=False)
+                if sampling == "quantile":
+                    sample = np.quantile(col, np.linspace(0, 1, min(len(col), n_reference)))
+                else:
+                    sample = rng.choice(col, size=min(len(col), n_reference), replace=False)
                 dmax = max(
                     stats.ks_2samp(sample, col[i:i + window_size]).statistic
                     for i in range(0, len(col) - window_size, window_size)
@@ -148,6 +157,7 @@ class CalibratedKSDetector(BaseDriftDetector):
             k_consecutive=int(drift_ref["k_consec"]),
             persistence_window=drift_ref.get("n_window"),
             feature_names=names,
+            sampling=drift_ref.get("sampling", "random"),
             samples=[drift_ref["sensors"][c]["sample"] for c in names],
             d_crit=[drift_ref["sensors"][c]["d_crit"] for c in names],
         )
@@ -157,10 +167,15 @@ class CalibratedKSDetector(BaseDriftDetector):
         rng = np.random.default_rng(0)
         sensors = {}
         for name, sample, dc in zip(self.feature_names, self.samples, self.d_crit):
-            keep = rng.choice(sample, size=min(len(sample), n_keep), replace=False)
+            if len(sample) <= n_keep:
+                keep = sample
+            elif self.sampling == "quantile":
+                keep = np.quantile(sample, np.linspace(0, 1, n_keep))
+            else:
+                keep = rng.choice(sample, size=n_keep, replace=False)
             sensors[name] = {"d_crit": float(dc), "sample": [round(float(v), 4) for v in keep]}
         out = {"reference_window": reference_window, "win": self.window_size,
-               "k_consec": self.k_consecutive, "sensors": sensors}
+               "k_consec": self.k_consecutive, "sampling": self.sampling, "sensors": sensors}
         if self.persistence_window is not None:
             out["n_window"] = self.persistence_window
         return out
@@ -214,8 +229,11 @@ class CalibratedKSDetector(BaseDriftDetector):
         self._runs = []
         self.last_d = None
 
-    def scan(self, frame: pd.DataFrame | np.ndarray, index=None) -> tuple[pd.DataFrame, list]:
+    def scan(self, frame: pd.DataFrame | np.ndarray, index=None, reset_gap=None) -> tuple[pd.DataFrame, list]:
         """Passa uma série inteira pelo detector, como o monitor faz em produção.
+
+        `reset_gap` (ex.: "3D"): com índice temporal, um buraco maior que isso entre duas amostras
+        (parada longa) zera a persistência, para dias de antes da parada não somarem com os de depois.
 
         Retorna (d_diario, disparos):
           d_diario : DataFrame com o D de cada janela avaliada, por feature, indexado pelo
@@ -231,8 +249,13 @@ class CalibratedKSDetector(BaseDriftDetector):
             X = X.reshape(-1, 1) if X.ndim == 1 else X
             index = pd.RangeIndex(len(X)) if index is None else index
         self.reset()
+        gap = pd.Timedelta(reset_gap) if reset_gap is not None else None
         linhas, instantes, disparos = [], [], []
+        anterior = None
         for t, x in zip(index, X):
+            if gap is not None and anterior is not None and (t - anterior) > gap:
+                self.reset()
+            anterior = t
             fired = self.update(x)
             if not self._buffer:            # uma janela acabou de ser avaliada
                 linhas.append(self.last_d.copy()); instantes.append(t)
@@ -250,12 +273,16 @@ class CalibratedKSDetector(BaseDriftDetector):
 #    modelo saudável 2025-26: alarme semanal máx. 1,0 % (2 de 84 semanas > 0,5 %); erro mediano ~1× (2× em 2026);
 #    modelo com drift (2022 lendo 2025-26): alarme mediano 7 %/semana, erro mediano 3,4×, 65 de 84 semanas > 2 %.
 RULES = {   # metric: (limiar, k, n)  → dispara se a métrica passou do limiar em >= k das últimas n semanas válidas
-    "amarelo": {"alarme_pct": (0.5, 2, 4), "erro_p50_rel": (2.0, 6, 8), "fora_clip_pct": (10.0, 2, 4)},
+    "amarelo": {"alarme_pct": (0.5, 2, 4), "erro_p50_rel": (2.0, 6, 8), "fora_clip_pct": (10.0, 2, 4),
+                "congelado_h": (0.0, 1, 1)},
     "vermelho": {"alarme_pct": (2.0, 4, 6), "erro_p50_rel": (2.5, 6, 8), "fora_clip_pct": (25.0, 4, 6)},
 }
 # fora_clip_pct (M5) = maior fração semanal, entre os sensores, de instantes FORA da faixa de clip do treino
 # (ali o valor é truncado e o modelo não vê o sensor → drift "por omissão", invisível ao alarme).
 # Só é calculado com --dados (CSV bruto) + --bundle; sem eles a métrica fica ausente e as regras dela não se aplicam.
+# congelado_h (M7) = horas da semana com DADO CONGELADO (3+ sensores com o mesmo valor por 12 h+: falha de
+# aquisição, o histórico repete o último valor). Qualquer hora na última semana → amarelo: avisar a instrumentação.
+# Esses trechos também ficam fora do M6 (calibração e varredura). Exige --dados + --bundle.
 MIN_SAMPLES_WEEK = 288   # >= 1 dia de operação (5 min) para a semana contar
 
 
@@ -324,6 +351,7 @@ def clip_saturation(dados_csv: Path, bundle_dir: Path, freq: str) -> pd.DataFram
 # algum sensor acima do limiar. B-8802B: ~4 dias de atraso no drift real (3,4–8,4 d conforme o
 # alinhamento das janelas), 0 falsos no controle sem drift com referência de 12 meses.
 M6_WIN, M6_KCONSEC, M6_NWIN, M6_NREF = 288, 3, 5, 2000
+M6_RESET_GAP = "3D"   # parada maior que isso zera a persistência (dias de antes não somam com os de depois)
 
 
 def _temporal_steps(bundle_dir: Path, df):
@@ -335,6 +363,23 @@ def _temporal_steps(bundle_dir: Path, df):
     return df
 
 
+def _sem_congelado(bundle_dir: Path, df):
+    """Tira os trechos de dado congelado (M7). Pacote de deploy antigo, sem a função: devolve df inalterado."""
+    sys.path.insert(0, str(bundle_dir.resolve().parents[2]))
+    import simpred_inference as si
+    return si.remove_frozen_segments(df) if hasattr(si, "remove_frozen_segments") else df
+
+
+def frozen_weekly(dados_csv: Path, bundle_dir: Path, freq: str) -> pd.DataFrame:
+    """M7: horas por semana com dado congelado, sobre os sensores que o modelo usa."""
+    sys.path.insert(0, str(bundle_dir.resolve().parents[2]))
+    import simpred_inference as si
+    if not hasattr(si, "frozen_mask"):
+        return pd.DataFrame()
+    m = si.frozen_mask(_temporal_steps(bundle_dir, si.carregar_dados(dados_csv)))
+    return pd.DataFrame({"congelado_h": m.astype(float).groupby(pd.Grouper(freq=freq)).sum() * 5 / 60})
+
+
 def make_drift_ref(dados_csv: Path, bundle_dir: Path, ref_start=None, ref_end=None) -> Path:
     """Calibra o M6 na janela normal do treino (alarm.json) e grava drift_ref.json no bundle."""
     alarm = json.loads((bundle_dir / "alarm.json").read_text())
@@ -342,9 +387,11 @@ def make_drift_ref(dados_csv: Path, bundle_dir: Path, ref_start=None, ref_end=No
     ref_start = ref_start or nw.get("start"); ref_end = ref_end or nw.get("end")
     if not (ref_start and ref_end):
         raise SystemExit("bundle sem threshold_calibration.normal_window — passe --ref-start/--ref-end")
-    df = _temporal_steps(bundle_dir, si_carregar(bundle_dir, dados_csv))
+    df = _sem_congelado(bundle_dir, _temporal_steps(bundle_dir, si_carregar(bundle_dir, dados_csv)))
     ref = df[(df.index >= pd.Timestamp(ref_start)) & (df.index <= pd.Timestamp(ref_end))]
-    det = CalibratedKSDetector(ref, window_size=M6_WIN, k_consecutive=M6_KCONSEC, persistence_window=M6_NWIN)
+    # quantis da referência inteira (não um sorteio): o limite e a amostra guardada não dependem de semente
+    det = CalibratedKSDetector(ref, window_size=M6_WIN, k_consecutive=M6_KCONSEC, persistence_window=M6_NWIN,
+                               n_reference=M6_NREF, sampling="quantile")
     out = det.to_drift_ref(reference_window=[str(ref_start), str(ref_end)], n_keep=M6_NREF)
     path = bundle_dir / "drift_ref.json"; path.write_text(json.dumps(out))
     print(f"drift_ref.json gravado em {path}  (referência {ref_start} → {ref_end}, {len(ref)} obs, {len(ref.columns)} sensores)")
@@ -354,8 +401,8 @@ def make_drift_ref(dados_csv: Path, bundle_dir: Path, ref_start=None, ref_end=No
 def ks_daily(dados_csv: Path, bundle_dir: Path) -> tuple[pd.DataFrame, list]:
     """M6 sobre toda a série: (D diário por sensor, disparos [(instante, [sensores])])."""
     det = CalibratedKSDetector.from_drift_ref(bundle_dir / "drift_ref.json")
-    df = _temporal_steps(bundle_dir, si_carregar(bundle_dir, dados_csv))
-    return det.scan(df)
+    df = _sem_congelado(bundle_dir, _temporal_steps(bundle_dir, si_carregar(bundle_dir, dados_csv)))
+    return det.scan(df, reset_gap=M6_RESET_GAP)
 
 
 def ks_daily_fires(dados_csv: Path, bundle_dir: Path) -> list:
@@ -377,7 +424,7 @@ def main():
     ap.add_argument("--csv", default=None, help="salvar a tabela semanal neste CSV")
     ap.add_argument("--png", default=None, help="salvar figura (alarme %% e erro relativo por semana)")
     ap.add_argument("--ultimas", type=int, default=8, help="quantas semanas imprimir (default 8)")
-    ap.add_argument("--dados", default=None, help="CSV BRUTO de entrada do deploy (habilita M5 = saturação do clip e M6 = KS diário)")
+    ap.add_argument("--dados", default=None, help="CSV BRUTO de entrada do deploy (habilita M5 = saturação do clip, M6 = KS diário e M7 = dado congelado)")
     ap.add_argument("--bundle", default=None, help="pasta do bundle (pipeline.json + clip_bounds.json); usa o simpred_inference.py do pacote")
     ap.add_argument("--make-drift-ref", action="store_true", help="só calibra e grava drift_ref.json no bundle (usa --dados + --bundle) e sai")
     ap.add_argument("--ref-start", default=None); ap.add_argument("--ref-end", default=None)
@@ -399,6 +446,7 @@ def main():
     m6_fires = []
     if args.dados and args.bundle:
         w = w.join(clip_saturation(Path(args.dados), Path(args.bundle), args.freq))
+        w = w.join(frozen_weekly(Path(args.dados), Path(args.bundle), args.freq))
         if (Path(args.bundle) / "drift_ref.json").exists():
             m6_fires = ks_daily_fires(Path(args.dados), Path(args.bundle))
     ev = evaluate(w)
@@ -412,7 +460,7 @@ def main():
     pd.set_option("display.width", 160)
     print(f"Equipamento: {Path(args.inferencia).stem}   μ treino = {mu_ref:.4f}   limiar alarme = {alarm['threshold']:.4f}")
     print(f"Período: {res.index.min()} → {res.index.max()}   semanas válidas: {ev['semanas_validas']}\n")
-    show = [c for c in ("n_instantes", "alarme_pct", "atencao_pct", "erro_p50_rel", "erro_p90_rel", "fora_clip_pct", "fora_clip_sensor") if c in w.columns]
+    show = [c for c in ("n_instantes", "alarme_pct", "atencao_pct", "erro_p50_rel", "erro_p90_rel", "fora_clip_pct", "fora_clip_sensor", "congelado_h") if c in w.columns]
     print(w[w["valida"]][show].tail(args.ultimas).round(3).to_string())
     if m6_fires:
         print(f"\nM6 (KS diário) — {len(m6_fires)} disparo(s) na série:")

@@ -361,6 +361,32 @@ def add_load_residual(
     return df, coefs
 
 
+def frozen_mask(df: pd.DataFrame, min_sensors: int = 3, min_hours: float = 12.0) -> pd.Series:
+    """True nos instantes em que `min_sensors` ou mais colunas estão com o mesmo valor há `min_hours` ou mais."""
+    n = np.zeros(len(df), dtype=int)
+    t = df.index.to_series()
+    for col in df.columns:
+        x = df[col]
+        g = t.groupby(((x != x.shift()).cumsum()).values)
+        n += ((g.transform("max") - g.transform("min")) >= pd.Timedelta(hours=min_hours)).to_numpy(dtype=int)
+    return pd.Series(n >= min_sensors, index=df.index)
+
+
+def remove_frozen_segments(df: pd.DataFrame, min_sensors: int = 3, min_hours: float = 12.0) -> pd.DataFrame:
+    """
+    Remove trechos de DADO CONGELADO: `min_sensors` ou mais sensores com o mesmo valor, ao mesmo tempo,
+    por `min_hours` ou mais. É falha de aquisição (o histórico repete o último valor recebido), não
+    comportamento do equipamento, e não pode entrar no treino, na referência do detector de drift nem
+    na pontuação. Um sensor sozinho parado por horas é normal com gravação por variação (pressões ficam
+    até ~16 h constantes no B-8802B), por isso a regra exige vários sensores juntos. No B-8802B
+    (3 sensores, 12 h) pega só os 4 episódios conhecidos: 02/01/25, 15-23/05/25, 22/02-04/03/26, 08-10/07/26.
+    Use APÓS resample/ffill e ANTES de select_features.
+    """
+    if len(df) == 0:
+        return df
+    return df[~frozen_mask(df, min_sensors, min_hours).to_numpy()].copy()
+
+
 def run_preprocessing(
     df: pd.DataFrame,
     steps: list[dict],
@@ -412,6 +438,8 @@ def run_preprocessing(
             df = remove_transients(df, **params)
         elif step == "remove_regime_transients":
             df = remove_regime_transients(df, **params)
+        elif step == "remove_frozen_segments":
+            df = remove_frozen_segments(df, **params)
         elif step == "normalize":
             df, artifacts.scaler = normalize(df, scaler=artifacts.scaler, **params)
         elif step == "clip":

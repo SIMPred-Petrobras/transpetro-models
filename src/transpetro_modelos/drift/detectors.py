@@ -415,6 +415,7 @@ class CalibratedKSDetector(BaseDriftDetector):
         persistence_window: int | None = 5,
         feature_names: list[str] | None = None,
         seed: int = 0,
+        sampling: str = "random",
         *,
         samples: list[np.ndarray] | None = None,
         d_crit: list[float] | None = None,
@@ -424,6 +425,11 @@ class CalibratedKSDetector(BaseDriftDetector):
         self.k_consecutive = k_consecutive
         # None = k janelas CONSECUTIVAS; n = k janelas acima dentre as últimas n (tolera dia intercalado)
         self.persistence_window = persistence_window
+        # "random": amostra sorteada da referência (o limite muda um pouco com a semente e o tamanho);
+        # "quantile": n_reference quantis igualmente espaçados da referência inteira (determinístico)
+        if sampling not in ("random", "quantile"):
+            raise ValueError("sampling deve ser 'random' ou 'quantile'.")
+        self.sampling = sampling
 
         if samples is not None and d_crit is not None:
             self.samples = [np.asarray(v, dtype=float) for v in samples]
@@ -447,7 +453,10 @@ class CalibratedKSDetector(BaseDriftDetector):
                         f"referência de '{self.feature_names[j]}' tem {len(col)} pontos; "
                         f"são necessários pelo menos {2 * window_size} (2 janelas)."
                     )
-                sample = rng.choice(col, size=min(len(col), n_reference), replace=False)
+                if sampling == "quantile":
+                    sample = np.quantile(col, np.linspace(0, 1, min(len(col), n_reference)))
+                else:
+                    sample = rng.choice(col, size=min(len(col), n_reference), replace=False)
                 dmax = max(
                     stats.ks_2samp(sample, col[i:i + window_size]).statistic
                     for i in range(0, len(col) - window_size, window_size)
@@ -473,6 +482,7 @@ class CalibratedKSDetector(BaseDriftDetector):
             k_consecutive=int(drift_ref["k_consec"]),
             persistence_window=drift_ref.get("n_window"),
             feature_names=names,
+            sampling=drift_ref.get("sampling", "random"),
             samples=[drift_ref["sensors"][c]["sample"] for c in names],
             d_crit=[drift_ref["sensors"][c]["d_crit"] for c in names],
         )
@@ -482,10 +492,15 @@ class CalibratedKSDetector(BaseDriftDetector):
         rng = np.random.default_rng(0)
         sensors = {}
         for name, sample, dc in zip(self.feature_names, self.samples, self.d_crit):
-            keep = rng.choice(sample, size=min(len(sample), n_keep), replace=False)
+            if len(sample) <= n_keep:
+                keep = sample
+            elif self.sampling == "quantile":
+                keep = np.quantile(sample, np.linspace(0, 1, n_keep))
+            else:
+                keep = rng.choice(sample, size=n_keep, replace=False)
             sensors[name] = {"d_crit": float(dc), "sample": [round(float(v), 4) for v in keep]}
         out = {"reference_window": reference_window, "win": self.window_size,
-               "k_consec": self.k_consecutive, "sensors": sensors}
+               "k_consec": self.k_consecutive, "sampling": self.sampling, "sensors": sensors}
         if self.persistence_window is not None:
             out["n_window"] = self.persistence_window
         return out
@@ -539,8 +554,11 @@ class CalibratedKSDetector(BaseDriftDetector):
         self._runs = []
         self.last_d = None
 
-    def scan(self, frame: pd.DataFrame | np.ndarray, index=None) -> tuple[pd.DataFrame, list]:
+    def scan(self, frame: pd.DataFrame | np.ndarray, index=None, reset_gap=None) -> tuple[pd.DataFrame, list]:
         """Passa uma série inteira pelo detector, como o monitor faz em produção.
+
+        `reset_gap` (ex.: "3D"): com índice temporal, um buraco maior que isso entre duas amostras
+        (parada longa) zera a persistência, para dias de antes da parada não somarem com os de depois.
 
         Retorna (d_diario, disparos):
           d_diario : DataFrame com o D de cada janela avaliada, por feature, indexado pelo
@@ -556,8 +574,13 @@ class CalibratedKSDetector(BaseDriftDetector):
             X = X.reshape(-1, 1) if X.ndim == 1 else X
             index = pd.RangeIndex(len(X)) if index is None else index
         self.reset()
+        gap = pd.Timedelta(reset_gap) if reset_gap is not None else None
         linhas, instantes, disparos = [], [], []
+        anterior = None
         for t, x in zip(index, X):
+            if gap is not None and anterior is not None and (t - anterior) > gap:
+                self.reset()
+            anterior = t
             fired = self.update(x)
             if not self._buffer:            # uma janela acabou de ser avaliada
                 linhas.append(self.last_d.copy()); instantes.append(t)

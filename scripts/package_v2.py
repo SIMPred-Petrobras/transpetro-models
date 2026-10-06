@@ -251,6 +251,22 @@ def remove_regime_transients(df, columns, deltas, minutes=90, window=3):
     in_mask = (since >= pd.Timedelta(0)) & (since < pd.Timedelta(minutes=minutes))
     return df[~in_mask.fillna(False).values].copy()
 
+def frozen_mask(df, min_sensors=3, min_hours=12.0):
+    """True nos instantes em que `min_sensors` ou mais sensores estão com o mesmo valor há `min_hours`."""
+    n = np.zeros(len(df), dtype=int)
+    t = df.index.to_series()
+    for col in df.columns:
+        x = df[col]
+        g = t.groupby(((x != x.shift()).cumsum()).values)
+        n += ((g.transform("max") - g.transform("min")) >= pd.Timedelta(hours=min_hours)).to_numpy(dtype=int)
+    return pd.Series(n >= min_sensors, index=df.index)
+
+def remove_frozen_segments(df, min_sensors=3, min_hours=12.0):
+    """Remove trechos de dado congelado (falha de aquisição: o histórico repete o último valor)."""
+    if len(df) == 0:
+        return df
+    return df[~frozen_mask(df, min_sensors, min_hours).to_numpy()].copy()
+
 def resample(df, freq="5min", agg="last"):
     """Reamostra a série COV para uma grade regular (último valor da janela)."""
     r = df.resample(freq)
@@ -307,6 +323,7 @@ _STEPS_TEMPORAIS = {
     "filter_running": filter_running,
     "remove_transients": remove_transients,
     "remove_regime_transients": remove_regime_transients,
+    "remove_frozen_segments": remove_frozen_segments,
     "resample": resample,
     "ffill": ffill,
     "moving_average": moving_average,
