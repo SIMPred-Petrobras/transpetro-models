@@ -44,6 +44,17 @@ Y_ALARM, Y_ATT, K_P, N_P = 6.5, 4.0, 15, 20
 def kofn(f, k=K_P, n=N_P): return (f.astype(int).rolling(n, min_periods=n).sum() >= k).fillna(False)
 
 
+def aplicar_rampa(df: pd.DataFrame, spec: str) -> pd.DataFrame:
+    """Degradação lenta simulada: `COLUNA:INICIO:DELTA_POR_MES` → coluna + delta × meses desde INICIO, só com a bomba
+    operando (mesma regra de `battery.inject`). Usada no teste da janela deslizante (scripts/janela_deslizante.py)."""
+    col, ini, delta = spec.rsplit(":", 2)
+    out = df.copy()
+    meses = np.clip(np.asarray((out.index - pd.Timestamp(ini)).total_seconds()) / (86400 * 30.4), 0, None)
+    out[col] = out[col].values + float(delta) * meses * (out["Pressão Descarga"] > 35).values
+    print(f"[rampa] {col}: +{float(delta)}/mês desde {ini} (até +{float(delta) * meses.max():.2f} no fim do dado)", flush=True)
+    return out
+
+
 def _t0_sintetica(raw: pd.DataFrame, cfg, ts, te, sy) -> pd.Timestamp:
     """Data da falha sintética do provisório: a mais tarde, no último mês da janela, com a bomba operando >= 80 %
     do tempo da injeção (rampa + platô)."""
@@ -71,6 +82,9 @@ def main():
                     help="registro do portão humano: operação confirmou que a janela de treino é operação normal")
     ap.add_argument("--epochs", type=int, default=60); ap.add_argument("--max-candidates", type=int, default=3)
     ap.add_argument("--from-clearml", action="store_true", help="lê o dado de treino do ClearML Dataset (worker remoto)")
+    ap.add_argument("--rampa", default=None, metavar="COLUNA:INICIO:DELTA_POR_MES",
+                    help="EXPERIMENTO: soma ao dado uma degradação lenta (rampa linear, só com a bomba operando) "
+                         "para testar se o retreino a aprende como normal; ex. 'Vibração Bomba LNA:2026-01-06:0.15'")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     cfg = EQUIPMENT_CONFIGS[a.equipment]
@@ -83,6 +97,8 @@ def main():
     if not a.operacao_confirmou:
         raise SystemExit("PORTÃO: rode com --operacao-confirmou após a operação validar a janela (política, seção 4).")
     raw = load_equipment_data(a.equipment, from_clearml=a.from_clearml)
+    if a.rampa:
+        raw = aplicar_rampa(raw, a.rampa)
     pre, _, _ = run_preprocessing(raw, cfg.pre_split_steps)
     tr_idx = pre[(pre.index >= ts) & (pre.index < te)]
     horas = len(tr_idx) / 12; meses = (te - ts).days / 30.4
