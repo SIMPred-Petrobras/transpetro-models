@@ -119,3 +119,6 @@ O pacote inclui `monitor_drift.py`, rodado 1× por semana sobre o CSV que a pró
 verde/amarelo/vermelho quando o "normal" da operação se afasta do que o modelo aprendeu (mudança de conceito) e
 avisa quando há dado congelado. Usa `drift_ref.json` e `residual_ref.json`, que vêm dentro do bundle.
 Guia de integração, com o que fazer em cada status e o fluxo de retreino: **`MONITORAMENTO.md`**.
+
+**Comece por `INTEGRACAO.md`**: o guia geral de integração (as três peças, requisitos e desempenho do retreino,
+checklist e perguntas frequentes).

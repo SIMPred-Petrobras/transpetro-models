@@ -136,7 +136,9 @@ responder:
 
 **Modelo provisório (antes dos 12 meses).** Esperar 12 meses com o modelo desatualizado é caro. Com ≥ 1 mês e
 ≥ 300 h do normal novo, `scripts/retrain_pipeline.py --provisorio` treina um provisório com a mesma receita e o refaz
-todo mês com tudo o que acumulou, até o definitivo. Bateria provisória: FP ≤ 0,5 % na validação (fim da janela),
+com 3, 6 e 12 meses de dado (só dado depois da mudança); o de 12 meses fica fixo até a próxima mudança confirmada.
+No replay do B-8802B, 1/3/6/12 deu 3 alertas falsos (0,09 % do tempo) contra 2 (0,04 %) refazendo todo mês, com 3
+trocas em vez de 11 (`notebooks/drift/resultados_retreino_B-8802B_out2026.ipynb`). Bateria provisória: FP ≤ 0,5 % na validação (fim da janela),
 alerta ≥ 0,5 d antes da falha de 2022 e falha sintética (no último mês da janela) detectada; o alarme no normal de
 2022 é só informativo, porque 2022 é o normal de antes do reparo. Teste no B-8802B: o provisório de 1 mês ficou 0 % em
 alarme no mês seguinte (o modelo de 2022, 1,5 %); no experimento acumulativo, a detecção de falha só ficou confiável

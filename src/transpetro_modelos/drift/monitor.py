@@ -278,7 +278,7 @@ def main():
     if alarm.get("provisional"):
         pv = alarm["provisional"]
         print(f"[aviso] bundle PROVISÓRIO: {pv.get('months')} mês(es) de dado do normal novo (até {str(pv.get('train_end'))[:10]}); "
-              "alertas com ressalva, retreinar todo mês até 12 meses")
+              "alertas com ressalva; próximos modelos com 3, 6 e 12 meses de dado")
     print(f"Período: {res.index.min()} → {res.index.max()}   semanas válidas: {ev['semanas_validas']}\n")
     show = [c for c in ("n_instantes", "alarme_pct", "atencao_pct", "erro_p50_rel", "erro_p90_rel", "fora_clip_pct", "fora_clip_sensor", "congelado_h") if c in w.columns]
     print(w[w["valida"]][show].tail(args.ultimas).round(3).to_string())

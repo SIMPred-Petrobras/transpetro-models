@@ -1,5 +1,7 @@
 # Monitoramento e retreino — guia de integração
 
+> Visão geral de tudo (inferência, monitor e retreino, requisitos, desempenho, perguntas frequentes): **`INTEGRACAO.md`**.
+
 Este guia é para o time de integração. Ele cobre duas coisas:
 
 - **A. O monitor semanal:** o que rodar, como ler e o que fazer com cada resultado. É o que precisa ser integrado.
@@ -113,13 +115,13 @@ perigoso: o monitor também reage a uma degradação real, e retreinar nela colo
   (`scripts/retrain_pipeline.py --operacao-confirmou`), que só aceita janela confirmada pela operação e entrega o
   bundle aprovado pela bateria (falso positivo fora do treino, falha real de 2022, falha simulada).
 - **Antes dos 12 meses: modelo provisório.** Com **1 mês** e ≥ 300 h de dado do normal novo, o time de modelos
-  treina um provisório (`scripts/retrain_pipeline.py --provisorio`) e o refaz **todo mês** com tudo o que acumulou,
-  até virar o definitivo aos 12 meses. Ele passa por uma bateria própria (alarme falso baixo na validação, alerta
+  treina um provisório (`scripts/retrain_pipeline.py --provisorio`) e o refaz com **3, 6 e 12 meses** de dado (só
+  dado depois da mudança); o de 12 meses fica fixo até a próxima mudança confirmada. Ele passa por uma bateria própria (alarme falso baixo na validação, alerta
   antes da falha real de 2022 e detecção da falha simulada) e vem marcado como provisório no `alarm.json`; o monitor
   avisa isso na saída. No teste do B-8802B, o provisório de 1 mês ficou 0 % do tempo em alarme no mês seguinte
   (o modelo antigo, 1,5 %), mas a detecção de falha só ficou confiável com ~8 meses: os alertas de um provisório
-  valem **com ressalva**. Para a integração, isso significa receber um bundle novo por mês nesse período, cada um
-  com o mesmo passo de sombra (que pode ser mais curto, 1 a 2 semanas, já que o próximo vem no mês seguinte).
+  valem **com ressalva**. Para a integração, isso significa receber até 4 bundles depois de cada mudança (1, 3, 6 e 12
+  meses), cada um com o mesmo passo de sombra (1 a 2 semanas para os de 1, 3 e 6 meses; 4 semanas para o de 12).
 - **Os detectores andam junto com o modelo.** Todo bundle novo vem com `drift_ref.json` (M6) e `residual_ref.json`
   (M8) calibrados no **mesmo período** do treino do modelo, porque o monitor responde se aquele modelo ainda descreve
   o equipamento. A referência não é uma janela deslizante: uma janela que acompanha os últimos meses absorveria a
@@ -157,7 +159,7 @@ Retreino, definitivo e provisório:
 python scripts/retrain_pipeline.py --equipment <EQUIP> --train-start <início do normal novo> --train-end <+12 meses> \
     --heldout-end <fim do held-out> --out <pasta> --operacao-confirmou
 
-# provisório: a partir de 1 mês; rodar de novo todo mês com o mesmo --train-start e o --train-end avançado
+# provisório: com 1, 3, 6 e 12 meses de dado; mesmo --train-start, --train-end avançado
 python scripts/retrain_pipeline.py --equipment <EQUIP> --provisorio --train-start <início do normal novo> \
     --train-end <hoje> --out <pasta> --operacao-confirmou
 ``` Política completa: `docs/politica_retreino.md`. Análise que embasa o M7 e o M8:

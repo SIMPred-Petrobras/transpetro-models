@@ -8,8 +8,8 @@ Pipeline de retreino (estágio 3 da política de drift) — executa a receita va
 NUNCA roda sem `--operacao-confirmou` (registro de que a operação confirmou que a janela é operação normal).
 
 Modelo PROVISÓRIO (`--provisorio`): depois de uma mudança confirmada, não se espera 12 meses com o modelo desatualizado.
-Com >= 1 mês e >= 300 h do normal novo treina-se um provisório, refeito todo mês com tudo o que acumulou (mesmo
---train-start, --train-end avançando um mês), até virar o definitivo com 12 meses. Diferenças: FP medido na validação
+Com >= 1 mês e >= 300 h do normal novo treina-se um provisório, refeito com 3, 6 e 12 meses de dado (mesmo
+--train-start, --train-end avançando), e o de 12 meses fica fixo até a próxima mudança confirmada. Diferenças: FP medido na validação
 (fim da janela; não há dado depois), falha sintética numa data escolhida no último mês da janela, bateria provisória
 (critérios mais brandos) e o bundle marcado como provisório no alarm.json. No B-8802B o provisório quase não deu alarme
 falso desde o 1º mês, mas só detectou falha de forma confiável com ~8 meses: os alertas dele valem com ressalva.
@@ -186,7 +186,7 @@ def main():
                                       "candidate": cand["tag"]},
             **({"provisional": {"months": round(meses, 1), "train_start": str(ts), "train_end": str(te),
                                 "note": "modelo provisório: alertas com ressalva; no B-8802B a detecção de falha só ficou "
-                                        "confiável com ~8 meses de dado. Retreinar todo mês até 12 meses (definitivo)."}}
+                                        "confiável com ~8 meses de dado. Refazer com 3, 6 e 12 meses de dado; o de 12 meses fica fixo."}}
                if a.provisorio else {})}, indent=1, ensure_ascii=False))
         print(f"\n[package] candidato #{i} ({cand['tag']}) → {bdir}", flush=True)
         mon.make_drift_ref(Path(data_csv), bdir)
