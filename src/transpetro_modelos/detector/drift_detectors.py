@@ -8,7 +8,7 @@ Detectores:
     - KSDriftDetector        : KS (p-valor) janela atual vs referência
     - PSIDriftDetector       : Population Stability Index
     - PageHinkleyDetector    : mudança de média, padronizado, média auto-adaptativa
-    - CUSUMDriftDetector     : soma cumulativa padronizada, média da referência
+    - CUSUMDriftDetector     : soma cumulativa padronizada, mediana/MAD da referência
     - ADWINLiteDetector      : janela adaptativa simplificada
     - CalibratedKSDetector   : KS com limiar D calibrado na referência + persistência
                                (lê/grava drift_ref.json)
@@ -37,6 +37,15 @@ O QUE MUDOU EM RELAÇÃO À VERSÃO ANTERIOR
  9. build_detector aplica log no erro por padrão (`transform="log"`): reduz a cauda
     pesada. Passe transform="none" para o comportamento antigo.
 10. Teste sintético embutido: `python drift_detectors.py`.
+11. NaN/inf: detectores univariados ignoram o valor. Antes, `max(0.0, nan)` zerava
+    os acumuladores do CUSUM/PH sem avisar.
+12. KS e PSI: `stride` padrão = `window_size` (janelas NÃO sobrepostas). Com 80% de
+    sobreposição, "3 testes consecutivos" eram quase o mesmo teste e a confirmação
+    não confirmava nada.
+13. CUSUM/PH: `n_boot` padrão 20 -> 100 (o quantil 0,95 de 20 valores era
+    praticamente o máximo, muito ruidoso).
+14. ADWIN-lite: corta no ponto de MAIOR z entre os que passam, não no primeiro
+    (o primeiro descartava menos do regime antigo do que devia).
 """
 
 from __future__ import annotations
@@ -110,6 +119,10 @@ class BaseDriftDetector(ABC):
         if self._in_alarm:
             return False
         x = np.asarray(x, dtype=float).reshape(-1) if self.multivariate else float(x)
+        # NaN/inf: ignora. Sem isso, max(0.0, nan) zerava os acumuladores do CUSUM/PH.
+        # (Os multivariados já filtram valores não finitos por feature.)
+        if not self.multivariate and not np.isfinite(x):
+            return False
         fired = bool(self._update(x))
         if fired:
             self._in_alarm = True
@@ -131,7 +144,10 @@ class KSDriftDetector(BaseDriftDetector):
     """KS de duas amostras, por feature, com decisão multivariada.
 
     Dispara quando >= `min_features` features têm p < alpha em `confirm_tests`
-    testes consecutivos (testes espaçados por `stride`). Referência 1D ou 2D.
+    testes consecutivos. Por padrão (`stride=None`) os testes usam janelas NÃO
+    sobrepostas (stride = window_size): com janelas sobrepostas, testes consecutivos
+    reaproveitam quase os mesmos pontos e a confirmação perde o sentido.
+    Referência 1D ou 2D.
     """
 
     name = "ks_test"
@@ -159,7 +175,7 @@ class KSDriftDetector(BaseDriftDetector):
         self._ref_cols = [c[np.isfinite(c)] for c in ref.T]
         self.window_size = window_size
         self.alpha = alpha
-        self.stride = stride if stride else max(1, window_size // 5)
+        self.stride = stride if stride else window_size
         self.direction = _check_direction(direction)
         self.confirm_tests = max(1, confirm_tests)
 
@@ -214,7 +230,8 @@ class PSIDriftDetector(BaseDriftDetector):
 
     O limiar é calibrado: max(threshold, margin x maior PSI entre janelas da
     própria referência). O 0,2 clássico só vale para amostras grandes; com janela
-    pequena o PSI "normal" já fica perto dele.
+    pequena o PSI "normal" já fica perto dele. `stride=None` = janelas não
+    sobrepostas (stride = window_size), para a confirmação ser independente.
     """
 
     name = "psi"
@@ -247,7 +264,7 @@ class PSIDriftDetector(BaseDriftDetector):
         self.ref_frac = self._frac(ref)
         self.ref_median = float(np.median(ref))
         self.window_size = window_size
-        self.stride = stride if stride else max(1, window_size // 5)
+        self.stride = stride if stride else window_size
         self.direction = _check_direction(direction)
         self.confirm_tests = max(1, confirm_tests)
 
@@ -323,11 +340,12 @@ class _SeqDetector(BaseDriftDetector):
     """Base de CUSUM/Page-Hinkley: soma cumulativa sobre z = (x - mediana)/MAD_sigma.
 
     s+ = max(0, s+ + z - m - k);  s- = max(0, s- + m - z - k);  dispara se s > h.
-      - CUSUM: m = 0 fixo (média da referência).
+      - CUSUM: m = 0 fixo (mediana da referência).
       - PH:    m = média móvel exponencial lenta de z (auto-referenciado).
     `h` None => calibrado por bootstrap em blocos: h = quantil `target_quantile` do
     pico da estatística em séries ressintetizadas da referência com `horizon_days`
-    dias (preserva a autocorrelação dentro do bloco).
+    dias (preserva a autocorrelação dentro do bloco). `n_boot` padrão 100: com
+    poucas repetições o quantil 0,95 vira quase o máximo e fica muito ruidoso.
     """
 
     def __init__(
@@ -339,7 +357,7 @@ class _SeqDetector(BaseDriftDetector):
         mean_rate: float,
         samples_per_day: int = 288,
         horizon_days: int = 90,
-        n_boot: int = 20,
+        n_boot: int = 100,
         target_quantile: float = 0.95,
         margin: float = 1.0,
         h_min: float = 3.0,
@@ -396,7 +414,7 @@ class _SeqDetector(BaseDriftDetector):
 
 
 class CUSUMDriftDetector(_SeqDetector):
-    """CUSUM padronizado (k e h em desvios-padrão robustos da referência)."""
+    """CUSUM padronizado (k e h em desvios-padrão robustos: mediana/MAD da referência)."""
 
     name = "cusum"
 
@@ -431,6 +449,8 @@ class ADWINLiteDetector(BaseDriftDetector):
     `min_effect` desvios da referência (significância prática: com muitos pontos
     qualquer diferença minúscula passa no teste estatístico). O erro-padrão é
     inflado pela autocorrelação lag-1 da referência (tamanho efetivo de amostra).
+    Ao disparar, descarta a parte antiga cortando no ponto de MAIOR z entre os que
+    passam nos dois critérios.
     """
 
     name = "adwin_lite"
@@ -478,7 +498,7 @@ class ADWINLiteDetector(BaseDriftDetector):
 
         arr = np.asarray(self._window, dtype=float)
         cuts = np.unique(np.linspace(self.min_subwindow, n - self.min_subwindow, self.n_cuts).astype(int))
-        best_z, hit_cut = 0.0, None
+        best_z, hit_cut, hit_z = 0.0, None, -np.inf
         for cut in cuts:
             w0, w1 = arr[:cut], arr[cut:]
             n0, n1 = len(w0), len(w1)
@@ -487,8 +507,9 @@ class ADWINLiteDetector(BaseDriftDetector):
             signed = diff if self.direction == "up" else -diff if self.direction == "down" else abs(diff)
             z = signed / (scale * self.inflate * np.sqrt(1 / n0 + 1 / n1))
             best_z = max(best_z, z)
-            if z > self.threshold and abs(diff) > self.min_effect * scale and hit_cut is None:
-                hit_cut = int(cut)
+            # entre os cortes que passam nos dois critérios, fica com o de maior z
+            if z > self.threshold and abs(diff) > self.min_effect * scale and z > hit_z:
+                hit_z, hit_cut = z, int(cut)
         self._last_score = best_z
         if hit_cut is not None:
             self._window = deque(arr[hit_cut:], maxlen=self.max_window)  # descarta a parte antiga
@@ -805,7 +826,9 @@ def _simular(n: int, spd: int, rng, shift_start: int | None = None, shift: float
 def benchmark_sintetico(spd: int = 288, ref_dias: int = 7, dias: int = 90, shift: float = 0.5,
                         seeds: int = 2, detectores: list[str] | None = None) -> pd.DataFrame:
     """Mede, por detector: falsos disparos/100 dias (sem drift) e atraso em dias (degrau/rampa).
-    Cada disparo é seguido de reset(), como no walk-forward."""
+    Cada disparo é seguido de reset(), como no walk-forward. Serve de teste de sanidade:
+    com poucas sementes e 90 dias o número de falsos alarmes medido é pequeno demais
+    para comparar detectores; use o período de controle de dados reais para isso."""
     import time
     detectores = detectores or DETECTOR_NAMES
     n = dias * spd
