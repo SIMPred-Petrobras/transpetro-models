@@ -38,8 +38,8 @@
     "fp_alarm_measured": 0.0003,
     "fp_attention_measured": 0.0005,
     "persistence": {
-      "k": 6,
-      "n": 6
+      "k": 15,
+      "n": 20
     },
     "normal_window": {
       "start": "2022-05-20 17:20:00",
@@ -47,6 +47,9 @@
       "n_points": 34661
     }
   },
-  "debounce_window": 6,
-  "debounce_min": 6
+  "debounce_window": 20,
+  "debounce_min": 15,
+  "persistence_mode": "time",
+  "persistence_step": "5min",
+  "min_alert_hours": 1.0
 }
