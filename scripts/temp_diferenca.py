@@ -25,6 +25,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "src"))
 from replay_pipeline import _baixar_csvs  # noqa: E402
 
 VAR = {"nivel": "B-8802B-2025", "dT1": "B-8802B-2025-dT1", "dT2": "B-8802B-2025-dT2"}
@@ -157,13 +158,18 @@ def main():
 
     out = ROOT / a.out
     out.mkdir(parents=True, exist_ok=True)
-    if not a.so_avaliar:
-        treinar(out, a.remote)
-    tab = avaliar(out, a.remote, logger)
-    print(tab.groupby("variante").median(numeric_only=True).round(3).to_string())
-    if task is not None:
-        task.upload_artifact("avaliacao", artifact_object=out / "avaliacao.csv")
-        task.upload_artifact("temp_diferenca", artifact_object=shutil.make_archive(str(out), "zip", out))
+    try:
+        if not a.so_avaliar:
+            treinar(out, a.remote)
+        tab = avaliar(out, a.remote, logger)
+        print(tab.groupby("variante").median(numeric_only=True).round(3).to_string())
+    finally:   # sobe o que tiver (logs do treino, candidatos, avaliação parcial) mesmo se algo falhar
+        if task is not None:
+            for f in out.glob("*.log"):
+                print(f"\n===== {f.name} (fim) =====\n" + "".join(f.read_text().splitlines(True)[-40:]), flush=True)
+            if (out / "avaliacao.csv").exists():
+                task.upload_artifact("avaliacao", artifact_object=out / "avaliacao.csv")
+            task.upload_artifact("temp_diferenca", artifact_object=shutil.make_archive(str(out), "zip", out))
     return 0
 
 
