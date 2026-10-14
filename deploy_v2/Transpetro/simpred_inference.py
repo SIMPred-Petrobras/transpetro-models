@@ -195,6 +195,14 @@ def moving_average(df, window=3, min_periods=1, columns=None):
     df[columns] = df[columns].rolling(window=window, min_periods=min_periods, center=False).mean()
     return df
 
+def add_differences(df, pairs):
+    """Acrescenta colunas de diferença, ex.: {"Δ Temp Bomba LA - Motor LA": ["Temperatura Bomba LA", "Temperatura Motor LA"]}.
+    Dois sensores no mesmo ambiente: a diferença tira a estação e fica o que é do mancal."""
+    df = df.copy()
+    for nome, (a, b) in pairs.items():
+        df[nome] = df[a] - df[b]
+    return df
+
 def select_features(df, features):
     """Seleciona (e ordena) as colunas usadas pelo modelo (erro amigável se faltar sensor)."""
     faltando = [c for c in features if c not in df.columns]
@@ -238,6 +246,7 @@ _STEPS_TEMPORAIS = {
     "resample": resample,
     "ffill": ffill,
     "moving_average": moving_average,
+    "add_differences": add_differences,
     "select_features": select_features,
 }
 

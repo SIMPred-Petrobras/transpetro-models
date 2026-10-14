@@ -53,6 +53,11 @@ BATTERY = {
 }
 
 
+# experimento temperatura em diferença (config.py): mesma bateria do B-8802B-2025
+for _k in ("B-8802B-2025-dT1", "B-8802B-2025-dT2"):
+    BATTERY[_k] = BATTERY["B-8802B-2025"]
+
+
 def score(bundle: Path, df: pd.DataFrame) -> pd.DataFrame:
     """Como no equipamento: com o CSV bruto (paradas fora da persistência) e a coluna `alerta` (regra de 1 h,
     quando o alarm.json a liga), que é o que chega à operação."""

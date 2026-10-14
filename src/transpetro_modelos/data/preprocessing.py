@@ -147,6 +147,15 @@ def normalize(
 
     return pd.DataFrame(values, index=df.index, columns=df.columns), scaler
 
+def add_differences(df: pd.DataFrame, pairs: dict[str, list[str]]) -> pd.DataFrame:
+    """Add difference columns, e.g. {"Δ Temp Bomba LA - Motor LA": ["Temperatura Bomba LA", "Temperatura Motor LA"]}.
+    Two sensors under the same ambient: the difference removes the season and keeps what belongs to the bearing."""
+    df = df.copy()
+    for name, (a, b) in pairs.items():
+        df[name] = df[a] - df[b]
+    return df
+
+
 def select_features(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     """Select a subset of columns."""
     return df[features].copy()
@@ -444,6 +453,8 @@ def run_preprocessing(
             df, artifacts.scaler = normalize(df, scaler=artifacts.scaler, **params)
         elif step == "clip":
             df, artifacts.clip_bounds = clip(df, bounds=artifacts.clip_bounds, **params)
+        elif step == "add_differences":
+            df = add_differences(df, **params)
         elif step == "select_features":
             df = select_features(df, **params)
         elif step == "remove_sensor_errors":

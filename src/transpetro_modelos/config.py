@@ -1,5 +1,5 @@
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Optional
 
@@ -647,6 +647,23 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
         preprocess_presets=deepcopy(_INTERPOLATED_PRESETS_LARA),
     ),
 }
+
+
+# ── Experimento TEMPERATURA EM DIFERENÇA (out/2026) sobre o B-8802B-2025 ──────────────────
+# A temperatura do mancal LA da bomba muda ~6 °C com a estação, o mesmo tamanho das mudanças reais (28/03/2026: −6 °C),
+# e em 2026 caiu abaixo do piso do clip (perda de sensibilidade). O mancal do motor sente o mesmo ambiente: a diferença
+# bomba − motor tira a estação e fica o que é do mancal. Mesmo dado, filtros e janelas do B-8802B-2025; só muda a entrada:
+#   dT1: Temperatura Bomba LA → Δ bomba LA − motor LA
+#   dT2: dT1 + Δ bomba LNA − motor LNA (o mancal LNA hoje não entra no modelo)
+_DT_PARES = {"Δ Temp Bomba LA - Motor LA": ["Temperatura Bomba LA", "Temperatura Motor LA"],
+             "Δ Temp Bomba LNA - Motor LNA": ["Temperatura Bomba LNA", "Temperatura Motor LNA"]}
+for _nome, _feats in (("B-8802B-2025-dT1", _B8802B_5_FEATURES[:4] + ["Δ Temp Bomba LA - Motor LA"]),
+                      ("B-8802B-2025-dT2", _B8802B_5_FEATURES[:4] + list(_DT_PARES))):
+    _base = EQUIPMENT_CONFIGS["B-8802B-2025"]
+    _steps = [st for st in deepcopy(_base.pre_split_steps) if st["step"] != "select_features"]
+    _steps += [{"step": "add_differences", "pairs": deepcopy(_DT_PARES)}, {"step": "select_features", "features": _feats}]
+    EQUIPMENT_CONFIGS[_nome] = replace(_base, equipment_id=_nome, dataset_file_stem="B-8802B-2025",
+                                       pre_split_steps=_steps, preprocess_presets=None)
 
 
 def get_preprocessing_steps(equipment_id: str, preset: str = "baseline") -> list[dict]:
