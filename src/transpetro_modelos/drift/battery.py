@@ -54,7 +54,8 @@ BATTERY = {
 
 
 # experimento temperatura em diferença (config.py): mesma bateria do B-8802B-2025
-for _k in ("B-8802B-2025-dT1", "B-8802B-2025-dT2"):
+# e vibração + pressões (sem temperatura): a mesma bateria; a assinatura sintética inclui a temperatura, que esse modelo ignora
+for _k in ("B-8802B-2025-dT1", "B-8802B-2025-dT2", "B-8802B-2025-vp"):
     BATTERY[_k] = BATTERY["B-8802B-2025"]
 
 

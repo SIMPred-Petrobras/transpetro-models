@@ -669,6 +669,15 @@ for _nome, _feats in (("B-8802B-2025-dT1", _B8802B_5_FEATURES[:4] + ["Δ Temp Bo
     EQUIPMENT_CONFIGS[_nome] = replace(_base, equipment_id=_nome, dataset_file_stem="B-8802B-2025",
                                        pre_split_steps=_steps, preprocess_presets=None)
 
+# Experimento vibração + pressões (out/2026, notebooks/b8802b/fe_exploracao_b8802b.ipynb): sem a temperatura do mancal LA.
+# Em abr–ago/2026 a temperatura responde por ~1/3 do erro do bundle (o mancal esfriou para ~45 °C) e não dá sensibilidade:
+# nem o bundle atual percebe uma falha só térmica. A temperatura passa a ser acompanhada por fora (M8 do monitor).
+_base = EQUIPMENT_CONFIGS["B-8802B-2025"]
+_steps = [st for st in deepcopy(_base.pre_split_steps) if st["step"] != "select_features"]
+_steps += [{"step": "select_features", "features": _B8802B_5_FEATURES[:4]}]
+EQUIPMENT_CONFIGS["B-8802B-2025-vp"] = replace(_base, equipment_id="B-8802B-2025-vp", dataset_file_stem="B-8802B-2025",
+                                              pre_split_steps=_steps, preprocess_presets=None)
+
 
 def get_preprocessing_steps(equipment_id: str, preset: str = "baseline") -> list[dict]:
     config = EQUIPMENT_CONFIGS[equipment_id]
