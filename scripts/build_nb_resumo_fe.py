@@ -12,6 +12,10 @@ md = lambda s: C.append(nbf.v4.new_markdown_cell(s)); code = lambda s: C.append(
 
 md("""# B-8802B · resumo: o que muda no modelo de anomalia sem a temperatura
 
+**Para o deploy: manter o modelo de produção atual** (5 sensores, retreinado com 2025, regra de 1 h). Nenhuma
+exploração foi claramente melhor. A única candidata é a receita **sem temperatura**, e ela só vale a troca se a operação
+confirmar que o episódio de 10–12/01/2026 foi real; até lá, pode rodar em paralelo (sombra) sem substituir.
+
 **Em 3 frases**
 1. Em 2026 o erro do modelo de produção sobe por causa da **temperatura** (o mancal esfriou), não por defeito.
 2. A falha de 2022 aparece na **vibração**: ela salta em 04/07, e **todos** os modelos que têm vibração alertam nesse
@@ -191,7 +195,51 @@ md("""**Leitura:**
 - **Só vibração**: também estável, mas alerta mais vezes em janeiro. Sem as pressões, o modelo não sabe em que regime
   a bomba está, e vibração que é normal num regime parece estranha.""")
 
-md("""## 4. Veredito
+md("""## 4. E o modelo antigo de 2022, que parecia mais limpo?
+
+O modelo da figura antiga usa **os mesmos 5 sensores** do modelo de produção atual; a diferença é o período de treino:
+- **modelo de 2022**: treinado só com maio–junho/2022 (6 semanas antes da falha);
+- **modelo de produção (2025)**: a mesma receita, retreinada com 2025 inteiro (depois do reparo).
+
+No mesmo estilo da figura antiga — vibração LA e, em vermelho, os pontos em alarme — os dois modelos na falha de 2022
+e em 2026:""")
+
+code(r'''ANTIGO = sorted((RAIZ / "deploy_v2/Transpetro/B-8802B/modelos").iterdir())[0]
+COMPARA = {"modelo de 2022 (treino mai–jun/2022)": ANTIGO, "modelo de produção (treino 2025)": fx.BUNDLE}
+JANELAS = [("falha de 2022", ctx.raw22, "2022-06-27", "2022-07-06 10:00"),
+           ("2026, sem falha conhecida", ctx.raw, "2026-01-01", "2026-08-10")]
+fig, axes = plt.subplots(2, 2, figsize=(15, 7), gridspec_kw={"width_ratios": [1.15, 2]})
+for i, (nome, b) in enumerate(COMPARA.items()):
+    for j, (tit, raw, ini, fim) in enumerate(JANELAS):
+        ax = axes[i, j]
+        torch.manual_seed(0)
+        r = battery.score(b, raw.loc[pd.Timestamp(ini) - pd.Timedelta(days=2):fim]).loc[ini:fim]
+        v = fx.temporal(raw.loc[ini:fim])["Vibração Bomba LA"].reindex(r.index)
+        ax.plot(v.index, v.values, color="#6f9fd1", lw=0.6)
+        al = r["is_anomaly"].astype(bool)
+        ax.scatter(v.index[al], v[al], color="#e5484d", s=6, zorder=3)
+        if j == 0:
+            ax.axvline(fx.FAIL, color="#f0a020", ls="--", lw=1.5)
+        pct = 100 * al.mean()
+        dias = len({t.date() for t in al[al].index})
+        estilo(ax, f"{nome} · {tit}")
+        ax.text(0.01, 0.95, f"em alarme {pct:.1f}% do tempo · {dias} dia(s) com alarme", transform=ax.transAxes,
+                va="top", fontsize=10, color="#222222", bbox=dict(facecolor="white", edgecolor="none", alpha=0.85))
+        ax.set_ylabel("vibração LA (mm/s)", fontsize=9)
+        if j == 0:
+            ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m" if j == 0 else "%m/%y"))
+fig.tight_layout()''')
+
+md("""**Leitura:**
+- **Na falha de 2022 os dois são iguais**: alarme a partir de 04/07, quando a vibração salta. A figura antiga parecia
+  limpa porque testava só esses 10 dias, logo depois do treino, no mesmo regime.
+- **Em 2026 o modelo de 2022 não serve**: a bomba foi reparada e opera em outra faixa (a vibração LA ficou ~2,5–3 mm/s
+  de base), então ele fica em alarme boa parte do tempo. Foi por isso que o modelo foi retreinado com 2025.
+- O código atual tem mais passos (filtros de transiente, persistência no tempo, regra de 1 h) porque cada um resolveu um
+  alarme falso que apareceu no dado de 2025–26. A receita do modelo (5 sensores, autoencoder) é a mesma.""")
+
+md("""## 5. Veredito
 
 Os números abaixo vêm de 6 modelos por receita (sementes diferentes), com a mesma regra de alarme de produção.""")
 
