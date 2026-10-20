@@ -147,6 +147,10 @@ só pelo menor alerta falso tende a escolher o modelo mais "cego". A grade fixa 
 aceitação garante a qualidade. **Rodar o AutoML de novo só se:** for um equipamento novo, mudarem os sensores, ou
 nenhum candidato da grade passar no teste de aceitação.
 
+Medido no B-8802B (`notebooks/b8802b/ciclo_retreino_b8802b.ipynb`, seção 5): o modelo de 12 meses da grade e o modelo
+escolhido pelo AutoML (59 h no ClearML) dão a mesma antecedência na falha real de 2022 (50 h) e na falha simulada
+(7–31 h conforme a data, a grade igual ou um pouco antes), e os dois só alertam em janeiro/2026. A grade leva ~5 min.
+
 ### 4.4 Requisitos do retreino
 
 **Dados**
@@ -226,7 +230,8 @@ e depois nenhum até a próxima mudança.
 ## 5. Desempenho do sistema (B-8802B)
 
 Medido rodando a política inteira sobre o dado real de jan/2025 a ago/2026, como se estivesse em produção
-(replay no ClearML; `notebooks/drift/resultados_retreino_B-8802B_out2026.ipynb`).
+(replay no ClearML; `notebooks/drift/resultados_retreino_B-8802B_out2026.ipynb`). Versão visual e resumida, do modelo
+na falha à troca de modelo: `notebooks/b8802b/ciclo_retreino_b8802b.ipynb`.
 
 | métrica | valor |
 |---|---|
