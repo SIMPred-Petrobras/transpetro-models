@@ -8,6 +8,7 @@ Variantes (config.py), todas com o mesmo dado, filtros, janela (treino 2025, hel
   dT1    B-8802B-2025-dT1  Temperatura Bomba LA → Δ bomba LA − motor LA
   dT2    B-8802B-2025-dT2  dT1 + Δ bomba LNA − motor LNA
   vp     B-8802B-2025-vp   sem temperatura: vibrações + pressões (out/2026; rodar com --variantes nivel vp)
+  vpd    B-8802B-2025-vp   o mesmo, com autoencoder denso no lugar do VAE (grade GRID_DENSE do retrain)
 
 Etapas: (1) scripts/retrain_pipeline.py por variante (grade 4 cfg × 3 sementes + bateria dos 3 melhores);
 (2) avaliação de TODOS os 12 candidatos de cada variante com a régua de deploy (μ+6,5σ, 15 de 20 no tempo, alerta ≥ 1 h):
@@ -29,7 +30,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "src"))
 from replay_pipeline import _baixar_csvs  # noqa: E402
 
-VAR = {"nivel": "B-8802B-2025", "dT1": "B-8802B-2025-dT1", "dT2": "B-8802B-2025-dT2", "vp": "B-8802B-2025-vp"}
+VAR = {"nivel": "B-8802B-2025", "dT1": "B-8802B-2025-dT1", "dT2": "B-8802B-2025-dT2", "vp": "B-8802B-2025-vp", "vpd": "B-8802B-2025-vp"}
+DENSO = {"vpd"}          # variantes treinadas com o autoencoder denso (--model-type dense) em vez do VAE
 TS, TE, HE = "2025-01-01", "2026-01-01", "2026-06-01"
 DATAS = ["2026-01-25", "2026-03-05", "2026-04-20", "2026-06-10", "2026-07-15"]
 RAMP, HOLD = 48, 24
@@ -41,6 +43,7 @@ def treinar(out: Path, remote: bool, variantes: list[str]):
         cmd = [sys.executable, str(ROOT / "scripts/retrain_pipeline.py"), "--equipment", eq, "--train-start", TS,
                "--train-end", TE, "--heldout-end", HE, "--out", str(out / nome), "--operacao-confirmou"]
         cmd += ["--from-clearml"] if remote else []
+        cmd += ["--model-type", "dense"] if nome in DENSO else []
         env = dict(os.environ, OMP_NUM_THREADS="4", MKL_NUM_THREADS="4")
         log = open(out / f"{nome}.log", "w")
         procs.append((nome, subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, env=env)))
@@ -54,7 +57,7 @@ def avaliar(out: Path, remote: bool, variantes: list[str], logger=None) -> pd.Da
     from transpetro_modelos.data.loading import load_equipment_data
     from transpetro_modelos.data.preprocessing import run_preprocessing
     from transpetro_modelos.training.automl import build_model
-    from transpetro_modelos.training.evaluate import compute_vae_errors
+    from transpetro_modelos.training.evaluate import compute_reconstruction_errors, compute_vae_errors
     from transpetro_modelos.drift import battery
     si = battery.si
 
@@ -87,19 +90,22 @@ def avaliar(out: Path, remote: bool, variantes: list[str], logger=None) -> pd.Da
             sat = np.nan                                  # variante sem temperatura (vp)
         for pt in sorted((out / var / "cands").glob("*.pt")):
             tag = pt.stem; lay = [int(v) for v in tag.split("_")[0][1:].split("-")]
-            m = build_model("vae", Xtr.shape[1], dense_layers=lay, latent_dim=16)
+            tipo = "dense" if var in DENSO else "vae"
+            m = (build_model("vae", Xtr.shape[1], dense_layers=lay, latent_dim=16) if tipo == "vae"
+                 else build_model("dense", Xtr.shape[1], dense_layers=lay))
             m.load_state_dict(torch.load(pt, map_location="cpu")); m.eval()
-            torch.manual_seed(0); e = pd.Series(compute_vae_errors(m, full), index=full.index)
+            erros = compute_vae_errors if tipo == "vae" else compute_reconstruction_errors
+            torch.manual_seed(0); e = pd.Series(erros(m, full), index=full.index)
             mtr = e[(e.index >= ts) & (e.index < te)]; mu, sd = float(mtr.mean()), float(mtr.std())
             b = out / "bundles" / var / tag; b.mkdir(parents=True, exist_ok=True)
             torch.save(m.state_dict(), b / "model_state.pt")
-            (b / "model_arch.json").write_text(json.dumps({"model_type": "vae", "input_dim": Xtr.shape[1],
-                                                           "encoding_layers": lay, "latent_dim": 16}))
+            (b / "model_arch.json").write_text(json.dumps({"model_type": tipo, "input_dim": Xtr.shape[1], "encoding_layers": lay,
+                                                           **({"latent_dim": 16} if tipo == "vae" else {})}))
             pickle.dump(art.scaler, open(b / "scaler.pkl", "wb"))
             (b / "clip_bounds.json").write_text(json.dumps({c: list(v) for c, v in art.clip_bounds.items()}, ensure_ascii=False))
             (b / "pipeline.json").write_text(json.dumps(list(cfg.pre_split_steps) + preset, ensure_ascii=False))
             (b / "alarm.json").write_text(json.dumps({
-                "model_type": "vae", "threshold": mu + 6.5 * sd, "threshold_attention": mu + 4 * sd,
+                "model_type": tipo, "threshold": mu + 6.5 * sd, "threshold_attention": mu + 4 * sd,
                 "debounce_window": 20, "debounce_min": 15, "persistence_mode": "time", "persistence_step": "5min",
                 "min_alert_hours": 1.0, "features": list(Xtr.columns)}, ensure_ascii=False))
             torch.manual_seed(0); f = battery.score(b, raw)["is_anomaly"]

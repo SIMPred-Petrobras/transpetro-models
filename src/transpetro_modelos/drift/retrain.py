@@ -29,14 +29,16 @@ from transpetro_modelos.config import EQUIPMENT_CONFIGS, get_preprocessing_steps
 from transpetro_modelos.data.loading import load_equipment_data
 from transpetro_modelos.data.preprocessing import run_preprocessing
 from transpetro_modelos.training.automl import build_model
-from transpetro_modelos.training.train import train_vae
-from transpetro_modelos.training.evaluate import compute_vae_errors
+from transpetro_modelos.training.train import train_autoencoder, train_vae
+from transpetro_modelos.training.evaluate import compute_reconstruction_errors, compute_vae_errors
 
 from transpetro_modelos.drift import battery, monitor as mon
 
 GRID = [  # (layers, latent, lr) — em volta da região vencedora das buscas anteriores; 3 seeds cada
     ((128, 64, 32), 16, 1e-4), ((128, 64, 32), 16, 1e-3), ((64, 32, 16), 16, 1e-3), ((256, 128, 64), 16, 1e-3),
 ]
+# autoencoder denso (--model-type dense): gargalo menor que a entrada, para não aprender a copiar; latent não se aplica
+GRID_DENSE = [((32, 16, 2), None, 1e-3), ((32, 16, 2), None, 1e-4), ((64, 32, 2), None, 1e-3), ((32, 16, 3), None, 1e-3)]
 SEEDS = (0, 1, 2)
 Y_ALARM, Y_ATT, K_P, N_P = 6.5, 4.0, 15, 20
 
@@ -80,6 +82,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--operacao-confirmou", action="store_true",
                     help="registro do portão humano: operação confirmou que a janela de treino é operação normal")
+    ap.add_argument("--model-type", choices=["vae", "dense"], default="vae")
     ap.add_argument("--epochs", type=int, default=60); ap.add_argument("--max-candidates", type=int, default=3)
     ap.add_argument("--from-clearml", action="store_true", help="lê o dado de treino do ClearML Dataset (worker remoto)")
     ap.add_argument("--rampa", default=None, metavar="COLUNA:INICIO:DELTA_POR_MES",
@@ -129,18 +132,23 @@ def main():
     XI = run_preprocessing(preI[(preI.index >= t0 - pd.Timedelta(days=2)) & (preI.index <= tf + pd.Timedelta(hours=sy["hold_h"] + 12))],
                            preset, fitted_artifacts=art, return_artifacts=True, return_report=True)[0]
     rank = []; cache = out / "cands"; cache.mkdir(exist_ok=True)
-    for layers, latent, lr in GRID:
+    vae = a.model_type == "vae"
+    erros = compute_vae_errors if vae else compute_reconstruction_errors
+    for layers, latent, lr in (GRID if vae else GRID_DENSE):
         for seed in SEEDS:
-            tag = f"l{'-'.join(map(str, layers))}_lat{latent}_lr{lr:g}_s{seed}"
-            m = build_model("vae", Xtr.shape[1], dense_layers=list(layers), latent_dim=latent)
+            tag = (f"l{'-'.join(map(str, layers))}_lat{latent}_lr{lr:g}_s{seed}" if vae
+                   else f"d{'-'.join(map(str, layers))}_lr{lr:g}_s{seed}")
+            m = (build_model("vae", Xtr.shape[1], dense_layers=list(layers), latent_dim=latent) if vae
+                 else build_model("dense", Xtr.shape[1], dense_layers=list(layers)))
             if (cache / f"{tag}.pt").exists():
                 m.load_state_dict(torch.load(cache / f"{tag}.pt", map_location="cpu")); m.eval()
             else:
                 torch.manual_seed(seed); np.random.seed(seed)
-                m = train_vae(m, dl(Xtr, True), dl(Xva, False), epochs=a.epochs, learning_rate=lr, weight_decay=1e-5, patience=10)
+                treino = train_vae if vae else train_autoencoder
+                m = treino(m, dl(Xtr, True), dl(Xva, False), epochs=a.epochs, learning_rate=lr, weight_decay=1e-5, patience=10)
                 m.eval(); torch.save(m.state_dict(), cache / f"{tag}.pt")
             torch.manual_seed(0)
-            e = pd.Series(compute_vae_errors(m, full), index=full.index)
+            e = pd.Series(erros(m, full), index=full.index)
             mtr = e[(e.index >= ts) & (e.index < te)]; mu, sd = float(mtr.mean()), float(mtr.std())
             fl = kofn(e > mu + Y_ALARM * sd)
             if a.provisorio:   # sem dado depois do treino: FP na validação (fim da janela, fora dos pesos)
@@ -148,7 +156,7 @@ def main():
             else:
                 fp_ho = 100 * fl[(fl.index >= te) & (fl.index < he)].mean()
                 fp_po = 100 * fl[fl.index >= he].mean()
-            eI = pd.Series(compute_vae_errors(m, XI), index=XI.index)
+            eI = pd.Series(erros(m, XI), index=XI.index)
             fI = kofn(eI > mu + Y_ALARM * sd); w_ = fI[(fI.index >= t0)]
             fi = w_[w_].index.min() if w_.any() else None
             synth_h = (tf - fi).total_seconds() / 3600 if fi is not None else -999.0
@@ -165,16 +173,18 @@ def main():
     # ── package + battery: empacota o melhor e valida; reprovou → próximo ───────
     data_csv = battery.BATTERY[a.equipment]["data_new"]
     for i, cand in enumerate(rank[: a.max_candidates], 1):
-        bdir = out / (f"model_{ts.date()}_{te.date()}_VAE" + ("_provisorio" if a.provisorio else ""))
+        bdir = out / (f"model_{ts.date()}_{te.date()}_{a.model_type.upper()}" + ("_provisorio" if a.provisorio else ""))
         bdir.mkdir(exist_ok=True)
         torch.save(cand["model"].state_dict(), bdir / "model_state.pt")
-        (bdir / "model_arch.json").write_text(json.dumps({"model_type": "vae", "input_dim": full.shape[1],
-                                                          "encoding_layers": list(cand["layers"]), "latent_dim": cand["latent"]}, indent=1))
+        arch = {"model_type": a.model_type, "input_dim": full.shape[1], "encoding_layers": list(cand["layers"])}
+        if vae:
+            arch["latent_dim"] = cand["latent"]
+        (bdir / "model_arch.json").write_text(json.dumps(arch, indent=1))
         pickle.dump(art.scaler, open(bdir / "scaler.pkl", "wb"))
         (bdir / "clip_bounds.json").write_text(json.dumps({c: list(v) for c, v in art.clip_bounds.items()}, indent=1, ensure_ascii=False))
         (bdir / "pipeline.json").write_text(json.dumps(list(cfg.pre_split_steps) + preset, indent=1, ensure_ascii=False))
         (bdir / "alarm.json").write_text(json.dumps({
-            "model_type": "vae", "threshold": float(cand["mu"] + Y_ALARM * cand["sd"]),
+            "model_type": a.model_type, "threshold": float(cand["mu"] + Y_ALARM * cand["sd"]),
             "threshold_attention": float(cand["mu"] + Y_ATT * cand["sd"]),
             "debounce_consecutive": 6, "debounce_window": N_P, "debounce_min": K_P,
             "persistence_mode": "time", "persistence_step": "5min", "min_alert_hours": 1.0,
