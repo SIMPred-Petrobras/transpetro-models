@@ -161,6 +161,59 @@ def episodios(f: pd.Series) -> int:
     return 0 if x.empty else int((x.index.to_series().diff() > pd.Timedelta("1h")).sum() + 1)
 
 
+def contexto():
+    """Dado 2025–26 e 2022, já filtrados, e as janelas brutas das falhas sintéticas."""
+    from types import SimpleNamespace
+    raw = si.carregar_dados(CFG["data_new"])
+    raw22 = si.carregar_dados(next(Path(CE["csv"]).rglob(CE["csv_glob"])))
+    pre, pre22 = temporal(raw), temporal(raw22)
+    print(f"dado 2025-26: {len(pre)} leituras de 5 min com a bomba operando; 2022: {len(pre22)}", flush=True)
+    janelas = {d: raw.loc[pd.Timestamp(d) - pd.Timedelta(days=5): pd.Timestamp(d) + pd.Timedelta(hours=RAMP + HOLD + 24)]
+               for d in DATAS}
+    liga = (raw[PD_] > 35).astype(float).resample("5min").max()
+    operando = {d: liga.loc[pd.Timestamp(d): pd.Timestamp(d) + pd.Timedelta(hours=RAMP + HOLD)].mean() for d in DATAS}
+    print("fração do tempo com a bomba operando em cada falha sintética:", {d: round(v, 2) for d, v in operando.items()})
+    return SimpleNamespace(raw=raw, raw22=raw22, pre=pre, pre22=pre22, janelas=janelas, operando=operando)
+
+
+def avaliar(ctx, var: str, cand: str, n_entradas: int, pontuar, extra: dict | None = None) -> list[dict]:
+    """Bateria de um modelo: `pontuar(pre)` devolve o score (erro de reconstrução) de um trecho pré-processado.
+    Uma linha para o score bruto e outra para o suavizado."""
+    e, e22 = pontuar(ctx.pre), pontuar(ctx.pre22)
+    linhas = []
+    for modo in ("bruto", "suave"):
+        s, s22 = (e, e22) if modo == "bruto" else (suavizar(e), suavizar(e22))
+        st = s[(s.index >= TS) & (s.index < TE)]
+        thr = float(st.mean() + Y_ALARM * st.std())
+        f, f22 = alertas(s, thr, ctx.raw), alertas(s22, thr, ctx.raw22)
+        rp = f22[(f22.index >= R0) & (f22.index < FAIL)]
+        first = rp[rp].index.min() if rp.any() else None
+        lin = {"variante": var, "cand": cand, "modo": modo, "n_entradas": n_entradas,
+               "rugosidade": float(s.diff().std() / s.std()),
+               "erro_2026T2T3/2025": float(s.loc["2026-04-01":].mean() / st.mean()),
+               "alerta_2025_%": 100 * f[f.index < TE].mean(),
+               "alerta_jan-mai26_%": 100 * f[(f.index >= TE) & (f.index < HE)].mean(),
+               "alerta_jun-ago26_%": 100 * f[f.index >= HE].mean(),
+               "episodios_2026": episodios(f[f.index >= TE]),
+               "falha2022_dias": (FAIL - first).total_seconds() / 86400 if first is not None else np.nan,
+               "normal2022_%": 100 * f22[f22.index < R0].mean(), **(extra or {})}
+        for d in DATAS:
+            t0 = pd.Timestamp(d); tf = t0 + pd.Timedelta(hours=RAMP); fim = tf + pd.Timedelta(hours=HOLD)
+            for esc_pct in (100, 50):
+                col = f"sint{esc_pct}_{d[5:]}_h"
+                if f[(f.index >= t0) & (f.index <= fim)].any() or ctx.operando[d] < 0.8:
+                    lin[col] = np.nan; continue     # já alerta sem a falha, ou bomba parada: não mede
+                rj = battery.inject(ctx.janelas[d], SIG, t0, RAMP, HOLD, esc_pct / 100)
+                ej = pontuar(temporal(rj))
+                w = alertas(ej if modo == "bruto" else suavizar(ej), thr, rj).loc[t0:fim]
+                fi = w[w].index.min() if w.any() else None
+                lin[col] = round((tf - fi).total_seconds() / 3600, 1) if fi is not None else -99.0
+        linhas.append(lin)
+        print({k: (round(v, 3) if isinstance(v, float) else v) for k, v in lin.items() if k != "parcela_abr-ago26"},
+              flush=True)
+    return linhas
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="results/fe_exploracao")
@@ -170,27 +223,17 @@ def main():
     out = ROOT / a.out
     (out / "scores").mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(4)
-
-    raw = si.carregar_dados(CFG["data_new"])
-    raw22 = si.carregar_dados(next(Path(CE["csv"]).rglob(CE["csv_glob"])))
-    pre, pre22 = temporal(raw), temporal(raw22)
-    print(f"dado 2025-26: {len(pre)} leituras de 5 min com a bomba operando; 2022: {len(pre22)}", flush=True)
+    ctx = contexto()
 
     arq = out / "avaliacao.csv"
     linhas = pd.read_csv(arq).to_dict("records") if arq.exists() else []
     feitos = {(r["variante"], r["cand"]) for r in linhas}
-    janelas = {d: raw.loc[pd.Timestamp(d) - pd.Timedelta(days=5): pd.Timestamp(d) + pd.Timedelta(hours=RAMP + HOLD + 24)]
-               for d in DATAS}
-    liga = (raw[PD_] > 35).astype(float).resample("5min").max()
-    operando = {d: liga.loc[pd.Timestamp(d): pd.Timestamp(d) + pd.Timedelta(hours=RAMP + HOLD)].mean() for d in DATAS}
-    print("fração do tempo com a bomba operando em cada falha sintética:", {d: round(v, 2) for d, v in operando.items()})
-
     for var in a.variantes:
-        F = features(pre, var)
+        F = features(ctx.pre, var)
         tr = F[(F.index >= TS) & (F.index < TE)]
         n_val = int(len(tr) * 0.15)
         esc = Escala().fit(tr.iloc[:-n_val])
-        X, X22 = esc(F), esc(features(pre22, var))
+        X = esc(F)
         Xfit, Xva = X.loc[tr.index[:-n_val]], X.loc[tr.index[-n_val:]]
         dl = lambda Z, sh: DataLoader(TensorDataset(torch.tensor(Z.values, dtype=torch.float32)), batch_size=256, shuffle=sh)
         cache = out / "cands" / var
@@ -210,43 +253,12 @@ def main():
                                   weight_decay=1e-5, patience=10)
                     torch.save(m.state_dict(), cache / f"{tag}.pt")
                 m.eval()
-                E, E22 = erros(m, X), erros(m, X22)
-                e, e22 = E.mean(axis=1), E22.mean(axis=1)
+                E = erros(m, X)
                 parcela = (E.loc["2026-04-01":].sum() / E.loc["2026-04-01":].values.sum() * 100).round(1)
-                pd.DataFrame({"score": e.astype("float32")}).to_parquet(out / "scores" / f"{var}__{tag}.parquet")
-                for modo in ("bruto", "suave"):
-                    s, s22 = (e, e22) if modo == "bruto" else (suavizar(e), suavizar(e22))
-                    st = s[(s.index >= TS) & (s.index < TE)]
-                    thr = float(st.mean() + Y_ALARM * st.std())
-                    f, f22 = alertas(s, thr, raw), alertas(s22, thr, raw22)
-                    rp = f22[(f22.index >= R0) & (f22.index < FAIL)]
-                    first = rp[rp].index.min() if rp.any() else None
-                    lin = {"variante": var, "cand": tag, "modo": modo, "n_entradas": X.shape[1],
-                           "rugosidade": float(s.diff().std() / s.std()),
-                           "erro_2026T2T3/2025": float(s.loc["2026-04-01":].mean() / st.mean()),
-                           "alerta_2025_%": 100 * f[f.index < TE].mean(),
-                           "alerta_jan-mai26_%": 100 * f[(f.index >= TE) & (f.index < HE)].mean(),
-                           "alerta_jun-ago26_%": 100 * f[f.index >= HE].mean(),
-                           "episodios_2026": episodios(f[f.index >= TE]),
-                           "falha2022_dias": (FAIL - first).total_seconds() / 86400 if first is not None else np.nan,
-                           "normal2022_%": 100 * f22[f22.index < R0].mean(),
-                           "parcela_abr-ago26": json.dumps(parcela.to_dict(), ensure_ascii=False)}
-                    for d in DATAS:
-                        t0 = pd.Timestamp(d); tf = t0 + pd.Timedelta(hours=RAMP); fim = tf + pd.Timedelta(hours=HOLD)
-                        for esc_pct in (100, 50):
-                            col = f"sint{esc_pct}_{d[5:]}_h"
-                            if f[(f.index >= t0) & (f.index <= fim)].any() or operando[d] < 0.8:
-                                lin[col] = np.nan; continue     # já alerta sem a falha, ou bomba parada: não mede
-                            rj = battery.inject(janelas[d], SIG, t0, RAMP, HOLD, esc_pct / 100)
-                            Xj = esc(features(temporal(rj), var))
-                            ej = erros(m, Xj).mean(axis=1)
-                            ej = ej if modo == "bruto" else suavizar(ej)
-                            w = alertas(ej, thr, rj).loc[t0:fim]
-                            fi = w[w].index.min() if w.any() else None
-                            lin[col] = round((tf - fi).total_seconds() / 3600, 1) if fi is not None else -99.0
-                    linhas.append(lin)
-                    print({k: (round(v, 3) if isinstance(v, float) else v) for k, v in lin.items() if k != "parcela_abr-ago26"},
-                          flush=True)
+                pd.DataFrame({"score": E.mean(axis=1).astype("float32")}).to_parquet(out / "scores" / f"{var}__{tag}.parquet")
+                linhas += avaliar(ctx, var, tag, X.shape[1],
+                                  lambda p, m=m, esc=esc, var=var: erros(m, esc(features(p, var))).mean(axis=1),
+                                  {"parcela_abr-ago26": json.dumps(parcela.to_dict(), ensure_ascii=False)})
                 pd.DataFrame(linhas).to_csv(arq, index=False)
                 print(f"[{var} {tag}] {time.time() - t_ini:.0f} s", flush=True)
     return 0

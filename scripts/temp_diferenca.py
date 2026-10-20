@@ -7,6 +7,7 @@ Variantes (config.py), todas com o mesmo dado, filtros, janela (treino 2025, hel
   nivel  B-8802B-2025      entrada atual (Temperatura Bomba LA)
   dT1    B-8802B-2025-dT1  Temperatura Bomba LA → Δ bomba LA − motor LA
   dT2    B-8802B-2025-dT2  dT1 + Δ bomba LNA − motor LNA
+  vp     B-8802B-2025-vp   sem temperatura: vibrações + pressões (out/2026; rodar com --variantes nivel vp)
 
 Etapas: (1) scripts/retrain_pipeline.py por variante (grade 4 cfg × 3 sementes + bateria dos 3 melhores);
 (2) avaliação de TODOS os 12 candidatos de cada variante com a régua de deploy (μ+6,5σ, 15 de 20 no tempo, alerta ≥ 1 h):
@@ -28,15 +29,15 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "src"))
 from replay_pipeline import _baixar_csvs  # noqa: E402
 
-VAR = {"nivel": "B-8802B-2025", "dT1": "B-8802B-2025-dT1", "dT2": "B-8802B-2025-dT2"}
+VAR = {"nivel": "B-8802B-2025", "dT1": "B-8802B-2025-dT1", "dT2": "B-8802B-2025-dT2", "vp": "B-8802B-2025-vp"}
 TS, TE, HE = "2025-01-01", "2026-01-01", "2026-06-01"
 DATAS = ["2026-01-25", "2026-03-05", "2026-04-20", "2026-06-10", "2026-07-15"]
 RAMP, HOLD = 48, 24
 
 
-def treinar(out: Path, remote: bool):
+def treinar(out: Path, remote: bool, variantes: list[str]):
     procs = []
-    for nome, eq in VAR.items():
+    for nome, eq in ((n, VAR[n]) for n in variantes):
         cmd = [sys.executable, str(ROOT / "scripts/retrain_pipeline.py"), "--equipment", eq, "--train-start", TS,
                "--train-end", TE, "--heldout-end", HE, "--out", str(out / nome), "--operacao-confirmou"]
         cmd += ["--from-clearml"] if remote else []
@@ -47,7 +48,7 @@ def treinar(out: Path, remote: bool):
         print(f"[treino] {nome}: código {p.wait()} (1 = nenhum candidato aprovado na bateria, não é erro)", flush=True)
 
 
-def avaliar(out: Path, remote: bool, logger=None) -> pd.DataFrame:
+def avaliar(out: Path, remote: bool, variantes: list[str], logger=None) -> pd.DataFrame:
     import torch
     from transpetro_modelos.config import EQUIPMENT_CONFIGS, get_preprocessing_steps
     from transpetro_modelos.data.loading import load_equipment_data
@@ -71,16 +72,19 @@ def avaliar(out: Path, remote: bool, logger=None) -> pd.DataFrame:
         return 0 if x.empty else int((x.index.to_series().diff() > pd.Timedelta("1h")).sum() + 1)
 
     linhas = []
-    for var, eq in VAR.items():
+    for var, eq in ((n, VAR[n]) for n in variantes):
         cfg = EQUIPMENT_CONFIGS[eq]; preset = get_preprocessing_steps(eq, "baseline")
         pre, _, _ = run_preprocessing(load_equipment_data(eq, from_clearml=remote), cfg.pre_split_steps)
         tr = pre[(pre.index >= ts) & (pre.index < te)]; n_val = int(len(tr) * 0.15)   # mesmo corte do retrain.py
         Xtr, art, _ = run_preprocessing(tr.iloc[:-n_val], preset, return_artifacts=True, return_report=True)
         full = run_preprocessing(pre, preset, fitted_artifacts=art, return_artifacts=True, return_report=True)[0]
         tcol = [c for c in Xtr.columns if "Temp" in c]
-        lo, hi = (np.array(v) for v in zip(*[art.clip_bounds[c] for c in tcol]))
-        z = pre.loc["2026-04-01":, tcol]
-        sat = 100 * ((z < lo) | (z > hi)).any(axis=1).mean()
+        if tcol:
+            lo, hi = (np.array(v) for v in zip(*[art.clip_bounds[c] for c in tcol]))
+            z = pre.loc["2026-04-01":, tcol]
+            sat = 100 * ((z < lo) | (z > hi)).any(axis=1).mean()
+        else:
+            sat = np.nan                                  # variante sem temperatura (vp)
         for pt in sorted((out / var / "cands").glob("*.pt")):
             tag = pt.stem; lay = [int(v) for v in tag.split("_")[0][1:].split("-")]
             m = build_model("vae", Xtr.shape[1], dense_layers=lay, latent_dim=16)
@@ -136,6 +140,7 @@ def main():
     ap.add_argument("--baixar", default=None, help="id da task do ClearML: baixa o artifact `temp_diferenca` para --out e sai")
     ap.add_argument("--so-avaliar", action="store_true", help="pula o treino (usa os candidatos em --out)")
     ap.add_argument("--clearml-task-name", default="temp-diferenca-b8802b")
+    ap.add_argument("--variantes", nargs="*", default=["nivel", "dT1", "dT2"], choices=list(VAR))
     a = ap.parse_args()
     if a.baixar:
         from clearml import Task
@@ -160,8 +165,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     try:
         if not a.so_avaliar:
-            treinar(out, a.remote)
-        tab = avaliar(out, a.remote, logger)
+            treinar(out, a.remote, a.variantes)
+        tab = avaliar(out, a.remote, a.variantes, logger)
         print(tab.groupby("variante").median(numeric_only=True).round(3).to_string())
     finally:   # sobe o que tiver (logs do treino, candidatos, avaliação parcial) mesmo se algo falhar
         if task is not None:
