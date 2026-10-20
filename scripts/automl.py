@@ -4,7 +4,9 @@ Grid search / AutoML para detecção de anomalias.
 Varre combinações de período de treino, preprocessing, modelo, threshold e
 hiperparâmetros para qualquer equipamento configurado em EQUIPMENT_CONFIGS.
 
-O ranking usa composite_score = prefailure_alert_rate * (1 - normal_alert_rate).
+Com falha observada, o ranking usa detecção/composite_score e restrição de FP.
+Com data sentinela (failure_observed=False), minimiza alertas held-out; exige
+bateria externa de sensibilidade antes da aprovação de qualquer candidato.
 O discrimination_ratio (prefailure / normal) é incluído como coluna auxiliar.
 
 Uso:
@@ -102,10 +104,20 @@ def _save_best_artifacts(
             pickle.dump(best_artifacts, f)
 
 
-def _select_best_row(rows: list[dict], max_fp_rate: float, select_by: str) -> dict | None:
-    """Seleciona o melhor row a partir da lista completa (mesma regra usada antes inline):
-    FP dentro da constraint E maior detecção pré-falha; desempate por MENOR FP."""
+def _select_best_row(rows: list[dict], max_fp_rate: float, select_by: str,
+                     failure_observed: bool = True) -> dict | None:
+    """Falha observada: maximiza detecção sob teto de FP.
+
+    Data sentinela: minimiza alerta held-out, sem usar pseudo-detecção.
+    """
     import numpy as np
+
+    if not failure_observed:
+        ranked = rank_results(rows, failure_observed=False)
+        best = ranked.iloc[0].to_dict()
+        if max_fp_rate > 0 and best["val_fp_rate_heldout"] > max_fp_rate:
+            return None
+        return best
 
     best_key = (-np.inf, -np.inf)
     best = None
@@ -167,6 +179,10 @@ def run_grid_search(args: argparse.Namespace):
     print(f"Device: {device}")
 
     config = EQUIPMENT_CONFIGS[args.equipment]
+    if not config.failure_observed:
+        args.select_by = "heldout"
+        print("Sem falha observada: seleção por menor taxa de alerta held-out. "
+              "A data sentinela não mede detecção; aprovação exige bateria de sensibilidade externa.")
 
     # Resolve janelas de avaliação: CLI explícito > config do equipamento > default global.
     if args.prefailure_days is None:
@@ -315,7 +331,8 @@ def run_grid_search(args: argparse.Namespace):
     # ── seleção do melhor a partir de TODOS os rows + um único retreino ──
     # (antes o melhor era re-treinado a cada melhora; agora retreina só o vencedor)
     best_model = best_scores = best_artifacts = best_trial = None
-    best_row = _select_best_row(rows, max_fp_rate, args.select_by)
+    best_row = _select_best_row(rows, max_fp_rate, args.select_by,
+                                failure_observed=config.failure_observed)
     if best_row is not None:
         best_trial = sig_to_trial.get(best_row.get("_sig"))
         if best_trial is None:  # rows de um grid antigo cujos args mudaram
@@ -330,6 +347,7 @@ def run_grid_search(args: argparse.Namespace):
         rows,
         max_fp_rate=max_fp_rate if max_fp_rate > 0 else None,
         fp_column="val_fp_rate_heldout" if args.select_by == "heldout" else "normal_alert_rate",
+        failure_observed=config.failure_observed,
     )
 
     print("\n" + "=" * 100)

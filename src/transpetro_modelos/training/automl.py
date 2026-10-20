@@ -620,6 +620,7 @@ def rank_results(
     rows: list[dict[str, Any]],
     max_fp_rate: float | None = None,
     fp_column: str = "normal_alert_rate",
+    failure_observed: bool = True,
 ) -> pd.DataFrame:
     """
     Ordena trials priorizando baixos falsos positivos.
@@ -635,8 +636,27 @@ def rank_results(
     medido na validação (auditoria A1); valores ausentes caem para o normal_alert_rate.
 
     Se max_fp_rate=None, usa o critério original: composite_score descendente.
+
+    Com failure_observed=False, ignora métricas de detecção e ordena somente
+    val_fp_rate_heldout válida (sem fallback ao treino). O ranking ainda mostra
+    candidatos acima do teto para diagnóstico; a seleção do runner os rejeita.
+    Sensibilidade deve ser avaliada por bateria externa.
     """
     df = pd.DataFrame(rows)
+
+    if not failure_observed:
+        # A sentinel date carries no detection label. Minimize held-out alert
+        # burden only, never reward alarms before that artificial date. The
+        # separate sensitivity battery is still required for model approval.
+        col = "val_fp_rate_heldout"
+        if col not in df:
+            raise ValueError("Sem falha observada, o ranking exige val_fp_rate_heldout.")
+        rates = pd.to_numeric(df[col], errors="coerce")
+        valid = df.loc[rates.notna() & np.isfinite(rates) & rates.between(0, 1)].copy()
+        if valid.empty:
+            raise ValueError("Sem taxas held-out válidas; não selecionar pelo período de treino.")
+        valid[col] = rates.loc[valid.index]
+        return valid.sort_values(col, kind="stable").reset_index(drop=True)
 
     if fp_column != "normal_alert_rate" and fp_column in df.columns:
         fp_sel = df[fp_column].fillna(df["normal_alert_rate"])

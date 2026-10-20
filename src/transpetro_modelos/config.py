@@ -25,6 +25,8 @@ class EquipmentConfig:
     # normal_alert_rate=0 e a constraint --max-fp-rate é silenciosamente desativada.
     prefailure_days: Optional[int] = None
     normal_end_days: Optional[int] = None
+    # False when failure_date is only a split sentinel, not an observed event.
+    failure_observed: bool = True
 
 
 _THERMAL_VIB_FEATURES = [
@@ -271,6 +273,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
     ),
     "B-8802B-2025": EquipmentConfig(
         equipment_id="B-8802B-2025",
+        failure_observed=False,
         # RETREINO PÓS-DRIFT (ago/2026): o modelo de 2022 dá 12% de alarme em 2025-26
         # (reparo pós-falha + faixa de regimes mais ampla que as 6 semanas do treino original).
         # NÃO há falha conhecida neste período: failure_date abaixo é SENTINELA (fim dos dados
@@ -339,6 +342,7 @@ EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
     # vencer, o deploy passa a precisar de 14 dias de histórico na entrada (estado) — avaliar.
     "B-8802B-2025-fe": EquipmentConfig(
         equipment_id="B-8802B-2025-fe",
+        failure_observed=False,
         failure_date=datetime(2026, 8, 11),
         failure_description="sem falha no período (experimento de feature engineering sobre o retreino 2025)",
         dataset_name="transpetro-b-8802b-2025",
