@@ -1,0 +1,34 @@
+{
+ "model_type": "vae",
+ "threshold": 1.0257918536663055,
+ "threshold_attention": 0.8682909160852432,
+ "debounce_window": 20,
+ "debounce_min": 15,
+ "persistence_mode": "time",
+ "persistence_step": "5min",
+ "min_alert_hours": 1.0,
+ "features": [
+  "CORRENTE ELÉTRICA DO MOTOR",
+  "PRESSÃO SUCÇÃO",
+  "PRESSÃO DESCARGA",
+  "VIB. MANCAL RADIAL BB LA 0° VE-50C",
+  "VIB. MANCAL RADIAL BB LA 90° VE-51C",
+  "VIB. MANCAL RADIAL BB LNA 0° VE-50D",
+  "VIB. MANCAL RADIAL BB LNA 90° VE-51D",
+  "VIB. MANCAL RADIAL MOT LA 0° VE-51B",
+  "VIB. MANCAL RADIAL MOT LA 90° VE-50B",
+  "VIB. MANCAL RADIAL MOT LNA 0° VE-50A",
+  "VIB. MANCAL RADIAL MOT LNA 90° VE-51A"
+ ],
+ "threshold_calibration": {
+  "method": "sigma",
+  "mean_normal": 0.23828716576099396,
+  "std_normal": 0.15750093758106232,
+  "y_alarm": 5.0,
+  "normal_window": {
+   "start": "2022-05-20 00:00:00",
+   "end": "2023-04-18 00:00:00"
+  },
+  "candidate": "l128-64-32_lat16_lr0.0001_s2"
+ }
+}

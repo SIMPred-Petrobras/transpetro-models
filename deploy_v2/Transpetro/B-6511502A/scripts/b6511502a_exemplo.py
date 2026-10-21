@@ -18,7 +18,7 @@ import simpred_inference as si
 # ── Bundle e dados deste equipamento (tudo relativo a esta pasta) ────────────
 EQUIP = "B-6511502A"
 EQUIP_DIR = Path(__file__).resolve().parent.parent      # .../Transpetro/B-6511502A
-BUNDLE_DIR = EQUIP_DIR / "modelos" / "model_2022-05-17_2023-05-17_VAE"
+BUNDLE_DIR = EQUIP_DIR / "modelos" / "model_2022-05-20_2023-04-18_VAE_11s"   # 11 sensores (out/2026); o anterior fica para rollback
 DADOS_DIR = EQUIP_DIR / "dados"
 CSV_NOME = "data_2022-05-17_2023-05-17_raw.csv"
 

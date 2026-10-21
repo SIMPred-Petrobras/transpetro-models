@@ -47,7 +47,7 @@ OUT = OUT_ROOT / "Transpetro"
 # equipamento -> pasta do bundle em deploy/Transpetro/<EQUIP>/modelos/
 EQUIPS = {
     "B-8802B":    "model_2022-05-15_2022-07-21_VAE",
-    "B-6511502A": "model_2022-05-17_2023-05-17_VAE",
+    "B-6511502A": "model_2022-05-20_2023-04-18_VAE_11s",   # 11 sensores (out/2026); o de 14 fica na pasta para rollback
     "B-3403C":    "model_2023-01-01_2023-09-15_DENSE",
     "B-8802B-2025": "model_2025-01-01_2026-08-10_VAE",   # retreino pós-drift (pasta separada do B-8802B)
 }

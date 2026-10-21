@@ -136,7 +136,7 @@ def rodar(out: Path, remote: bool, rapido: bool):
             m.eval(); torch.manual_seed(0)
             e = pd.Series(ds.compute_vae_errors(m, full), index=full.index)
             et = e[(e.index >= TS) & (e.index < TE)]
-            b = sb.salvar(out / "cands" / tag, m, latent, layers, art, float(et.mean()), float(et.std()), steps, preset)
+            b = sb.salvar(out / "cands" / tag, m, latent, layers, art, float(et.mean()), float(et.std()), steps, preset, TS, TE)
             f = ds.alerta(b, raw)
             sint = []
             for d in DATAS_SINT:

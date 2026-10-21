@@ -92,8 +92,8 @@ def rodar(out: Path, remote: bool, variantes: list[str], rapido: bool):
     return pd.DataFrame(linhas)
 
 
-def salvar(pasta, m, latent, layers, art, mu, sd, steps, preset):
-    b = ds.salvar_bundle(pasta, m, latent, layers, art, mu, sd, TS, TE, preset)
+def salvar(pasta, m, latent, layers, art, mu, sd, steps, preset, ts=TS, te=TE):
+    b = ds.salvar_bundle(pasta, m, latent, layers, art, mu, sd, ts, te, preset)
     (b / "pipeline.json").write_text(json.dumps(list(steps) + preset, ensure_ascii=False))   # com o select_features da variante
     return b
 
