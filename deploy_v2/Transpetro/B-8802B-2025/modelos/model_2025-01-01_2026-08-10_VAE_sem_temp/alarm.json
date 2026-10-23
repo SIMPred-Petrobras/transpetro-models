@@ -1,0 +1,33 @@
+{
+ "model_type": "vae",
+ "threshold": 0.35544722341001034,
+ "threshold_attention": 0.2364623174071312,
+ "debounce_window": 20,
+ "debounce_min": 15,
+ "persistence_mode": "time",
+ "persistence_step": "5min",
+ "min_alert_hours": 1.0,
+ "features": [
+  "Pressão Sucção",
+  "Pressão Descarga",
+  "Vibração Bomba LA",
+  "Vibração Bomba LNA"
+ ],
+ "threshold_calibration": {
+  "method": "sigma",
+  "mean_normal": 0.04608646780252457,
+  "std_normal": 0.04759396240115166,
+  "y_alarm": 6.5,
+  "y_attention": 4.0,
+  "persistence": {
+   "k": 15,
+   "n": 20
+  },
+  "normal_window": {
+   "start": "2025-01-01 00:00:00",
+   "end": "2026-01-01 00:00:00"
+  },
+  "candidate": "l128-64-32_lat16_lr0.001_s2",
+  "nota": "sem a temperatura do mancal LA (out/2026); temperatura vigiada pelo M8, só aquecimento"
+ }
+}

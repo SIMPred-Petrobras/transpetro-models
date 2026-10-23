@@ -28,7 +28,8 @@
    "k": 3,
    "n": 5,
    "min_coverage": 0.5,
-   "reset_gap": "3 days 00:00:00"
+   "reset_gap": "3 days 00:00:00",
+   "lado": "acima"
   }
  ]
 }

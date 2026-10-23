@@ -173,7 +173,7 @@ def ks_daily_fires(dados_csv: Path, bundle_dir: Path) -> list:
 
 
 def make_residual_ref(dados_csv: Path, bundle_dir: Path, alvos: list[str], preditores: list[str],
-                      ref_start=None, ref_end=None) -> Path:
+                      ref_start=None, ref_end=None, lado: str = "ambos") -> Path:
     """Calibra o M8 (um detector por alvo) na janela normal do treino e grava residual_ref.json no bundle."""
     alarm = json.loads((bundle_dir / "alarm.json").read_text())
     nw = alarm.get("threshold_calibration", {}).get("normal_window", {})
@@ -184,7 +184,7 @@ def make_residual_ref(dados_csv: Path, bundle_dir: Path, alvos: list[str], predi
     ref = df[(df.index >= pd.Timestamp(ref_start)) & (df.index <= pd.Timestamp(ref_end))]
     dets = []
     for alvo in alvos:
-        det = ResidualLevelDetector(alvo, preditores).fit(ref)
+        det = ResidualLevelDetector(alvo, preditores, lado=lado).fit(ref)
         print(f"M8 {alvo}: R² {det.r2:.2f}, faixa normal do resíduo {det.band[0]:.1f} a {det.band[1]:.1f}"
               + ("   [aviso: R² < 0,5, a regressão explica pouco o sensor; prefira deixá-lo só no M6]" if det.r2 < 0.5 else ""))
         dets.append(det.to_dict())
@@ -226,6 +226,8 @@ def main():
                     help="só calibra e grava residual_ref.json (M8) no bundle (usa --dados + --bundle + --alvos + --preditores) e sai")
     ap.add_argument("--alvos", default=None, help="M8: temperaturas a monitorar, separadas por vírgula (ex.: 'Temperatura Bomba LA')")
     ap.add_argument("--preditores", default=None, help="M8: sensores que explicam o alvo (estação e carga), separados por vírgula")
+    ap.add_argument("--m8-lado", default="ambos", choices=["ambos", "acima", "abaixo"],
+                    help="M8: avisar quando a temperatura fica acima, abaixo ou fora (ambos) da faixa esperada")
     ap.add_argument("--ref-start", default=None); ap.add_argument("--ref-end", default=None)
     args = ap.parse_args()
 
@@ -235,7 +237,7 @@ def main():
         if not (args.alvos and args.preditores):
             raise SystemExit("--make-residual-ref precisa de --alvos e --preditores")
         make_residual_ref(Path(args.dados), Path(args.bundle), [a.strip() for a in args.alvos.split(",")],
-                          [p.strip() for p in args.preditores.split(",")], args.ref_start, args.ref_end); return 0
+                          [p.strip() for p in args.preditores.split(",")], args.ref_start, args.ref_end, args.m8_lado); return 0
     if not (args.inferencia and args.alarm):
         ap.error("--inferencia e --alarm são obrigatórios para monitorar")
 

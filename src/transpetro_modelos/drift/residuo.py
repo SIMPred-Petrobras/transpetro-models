@@ -18,6 +18,10 @@ Validação (notebooks/drift/mudanca_conceito_B-8802B.ipynb):
   do degrau (o KS bruto: nenhum disparo robusto).
 - B-4064A, mancal LNA: volta do reparo (+20 °C) em 2 dias; 0 disparos falsos com referência de só 4 meses (o KS
   bruto dá 2, pela estação) e 0 com 12 meses; não dispara na rampa de 2 dias da falha (papel do modelo de anomalia).
+`lado` escolhe o que conta como mudança: "ambos" (padrão), "acima" (só o sensor mais alto que o esperado) ou "abaixo".
+No B-8802B o M8 vigia só "acima": um mancal mais frio que o esperado não indica falha (pode ter vários motivos), e a
+falha de 2022 esquentou o mancal (~+7 °C); o modelo de anomalia sem temperatura deixa esse sinal térmico para cá.
+
 Limite: precisa de uma regressão que explique o sensor (no mancal LNA do B-8802B, R² 0,32 e faixa de −6 a +22 °C:
 não serve); e, como o KS, de referência longa o bastante para cobrir os regimes.
 
@@ -35,8 +39,11 @@ class ResidualLevelDetector:
     """Mediana diária do resíduo de um modelo de comportamento normal fora da faixa da referência."""
 
     def __init__(self, target: str, predictors: list[str], q: float = 0.005, k: int = 3, n: int = 5,
-                 min_coverage: float = 0.5, reset_gap: str = "3D"):
+                 min_coverage: float = 0.5, reset_gap: str = "3D", lado: str = "ambos"):
+        if lado not in ("ambos", "acima", "abaixo"):
+            raise ValueError(f"lado deve ser 'ambos', 'acima' ou 'abaixo', não {lado!r}")
         self.target, self.predictors = target, list(predictors)
+        self.lado = lado
         self.q, self.k, self.n = q, k, n
         self.min_coverage = min_coverage      # fração mínima do dia com operação para o dia contar
         self.reset_gap = pd.Timedelta(reset_gap)
@@ -75,12 +82,12 @@ class ResidualLevelDetector:
     def to_dict(self) -> dict:
         return {"target": self.target, "predictors": self.predictors, "coef": [float(v) for v in self.coef],
                 "intercept": self.intercept, "band": list(self.band), "r2": self.r2, "q": self.q, "k": self.k,
-                "n": self.n, "min_coverage": self.min_coverage, "reset_gap": str(self.reset_gap)}
+                "n": self.n, "min_coverage": self.min_coverage, "reset_gap": str(self.reset_gap), "lado": self.lado}
 
     @classmethod
     def from_dict(cls, d: dict) -> "ResidualLevelDetector":
         det = cls(d["target"], d["predictors"], q=d["q"], k=d["k"], n=d["n"], min_coverage=d["min_coverage"],
-                  reset_gap=d["reset_gap"])
+                  reset_gap=d["reset_gap"], lado=d.get("lado", "ambos"))   # referências antigas: os dois lados
         det.coef, det.intercept = np.asarray(d["coef"], dtype=float), float(d["intercept"])
         det.band, det.r2 = tuple(d["band"]), d.get("r2")
         return det
@@ -94,7 +101,8 @@ class ResidualLevelDetector:
             if anterior is not None and t - anterior > self.reset_gap:
                 hist = []
             anterior = t
-            hist = (hist + [bool(v < lo or v > hi)])[-self.n:]
+            fora = {"ambos": v < lo or v > hi, "acima": v > hi, "abaixo": v < lo}[self.lado]
+            hist = (hist + [bool(fora)])[-self.n:]
             if sum(hist) >= self.k:
                 disparos.append(t)
                 hist = []

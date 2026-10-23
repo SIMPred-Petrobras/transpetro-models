@@ -205,7 +205,8 @@ def main():
         rr_atual = Path(battery.BATTERY[a.equipment]["bundle"]) / "residual_ref.json"
         if rr_atual.exists():
             m8 = json.loads(rr_atual.read_text())["detectors"]
-            mon.make_residual_ref(Path(data_csv), bdir, [d["target"] for d in m8], m8[0]["predictors"])
+            mon.make_residual_ref(Path(data_csv), bdir, [d["target"] for d in m8], m8[0]["predictors"],
+                                  lado=m8[0].get("lado", "ambos"))
         print(f"[battery] candidato #{i}:", flush=True)
         if a.provisorio:
             res = battery.run_battery(a.equipment, bundle=bdir, train_end=str(te), provisional=True,

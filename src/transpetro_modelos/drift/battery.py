@@ -30,6 +30,9 @@ BATTERY = {
             # 10/08/26 saiu: contando só medição real (sem os minutos de parada preenchidos pelo ffill) o alarme
             # durou 40 min e não vira alerta pela regra de 1 h (notebooks/drift/apresentacao_simpred_B-8802B.ipynb)
             "ep2 17/01/26 vib LA+LNA": ("2026-01-17 21:30", "2026-01-17 22:40"),
+            # out/2026: vibração LA 3,3–3,4 e LNA 1,4–1,6 mm/s por ~2 dias, acima do p99 de 2025 e com a LNA mais alta que
+            # no ep2; o modelo de 2025 vê o score passar do limiar (p99 1,27×) sem persistir. Pendente confirmação da operação.
+            "ep1 10–12/01/26 vib LA+LNA": ("2026-01-10 18:00", "2026-01-12 12:00"),
         },
         "cross_era": {
             "csv": DEP / "B-8802B/dados", "csv_glob": "*_raw.csv",
@@ -94,7 +97,12 @@ def run_battery(equipment: str, bundle: Path | None = None, data_new: Path | Non
     raw = si.carregar_dados(data_new)
     res = score(bundle, raw)
     fl = res["is_anomaly"]
-    tr, ho, post = fl[fl.index < train_end], fl[(fl.index >= train_end) & (fl.index < heldout_end)], fl[fl.index >= heldout_end]
+    # alarme num episódio-âncora (evento esperado) não é falso positivo: as janelas das âncoras saem da conta do FP
+    esperado = pd.Series(False, index=fl.index)
+    for a_, b_ in cfg["anchors"].values():
+        esperado |= (fl.index >= pd.Timestamp(a_) - pd.Timedelta(hours=2)) & (fl.index <= pd.Timestamp(b_) + pd.Timedelta(hours=2))
+    fl_fp = fl[~esperado]
+    tr, ho, post = fl_fp[fl_fp.index < train_end], fl_fp[(fl_fp.index >= train_end) & (fl_fp.index < heldout_end)], fl_fp[fl_fp.index >= heldout_end]
     out = {"fp_treino_pct": 100 * tr.mean(), "fp_heldout_pct": 100 * ho.mean(), "fp_post_pct": 100 * post.mean()}
     P(f"[1] FP: treino {out['fp_treino_pct']:.3f}%  held-out {out['fp_heldout_pct']:.3f}%  posterior {out['fp_post_pct']:.3f}%")
 

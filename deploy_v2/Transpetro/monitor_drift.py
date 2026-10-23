@@ -273,8 +273,11 @@ class ResidualLevelDetector:
     """Mediana diária do resíduo de um modelo de comportamento normal fora da faixa da referência."""
 
     def __init__(self, target: str, predictors: list[str], q: float = 0.005, k: int = 3, n: int = 5,
-                 min_coverage: float = 0.5, reset_gap: str = "3D"):
+                 min_coverage: float = 0.5, reset_gap: str = "3D", lado: str = "ambos"):
+        if lado not in ("ambos", "acima", "abaixo"):
+            raise ValueError(f"lado deve ser 'ambos', 'acima' ou 'abaixo', não {lado!r}")
         self.target, self.predictors = target, list(predictors)
+        self.lado = lado
         self.q, self.k, self.n = q, k, n
         self.min_coverage = min_coverage      # fração mínima do dia com operação para o dia contar
         self.reset_gap = pd.Timedelta(reset_gap)
@@ -313,12 +316,12 @@ class ResidualLevelDetector:
     def to_dict(self) -> dict:
         return {"target": self.target, "predictors": self.predictors, "coef": [float(v) for v in self.coef],
                 "intercept": self.intercept, "band": list(self.band), "r2": self.r2, "q": self.q, "k": self.k,
-                "n": self.n, "min_coverage": self.min_coverage, "reset_gap": str(self.reset_gap)}
+                "n": self.n, "min_coverage": self.min_coverage, "reset_gap": str(self.reset_gap), "lado": self.lado}
 
     @classmethod
     def from_dict(cls, d: dict) -> "ResidualLevelDetector":
         det = cls(d["target"], d["predictors"], q=d["q"], k=d["k"], n=d["n"], min_coverage=d["min_coverage"],
-                  reset_gap=d["reset_gap"])
+                  reset_gap=d["reset_gap"], lado=d.get("lado", "ambos"))   # referências antigas: os dois lados
         det.coef, det.intercept = np.asarray(d["coef"], dtype=float), float(d["intercept"])
         det.band, det.r2 = tuple(d["band"]), d.get("r2")
         return det
@@ -332,7 +335,8 @@ class ResidualLevelDetector:
             if anterior is not None and t - anterior > self.reset_gap:
                 hist = []
             anterior = t
-            hist = (hist + [bool(v < lo or v > hi)])[-self.n:]
+            fora = {"ambos": v < lo or v > hi, "acima": v > hi, "abaixo": v < lo}[self.lado]
+            hist = (hist + [bool(fora)])[-self.n:]
             if sum(hist) >= self.k:
                 disparos.append(t)
                 hist = []
@@ -493,7 +497,7 @@ def ks_daily_fires(dados_csv: Path, bundle_dir: Path) -> list:
 
 
 def make_residual_ref(dados_csv: Path, bundle_dir: Path, alvos: list[str], preditores: list[str],
-                      ref_start=None, ref_end=None) -> Path:
+                      ref_start=None, ref_end=None, lado: str = "ambos") -> Path:
     """Calibra o M8 (um detector por alvo) na janela normal do treino e grava residual_ref.json no bundle."""
     alarm = json.loads((bundle_dir / "alarm.json").read_text())
     nw = alarm.get("threshold_calibration", {}).get("normal_window", {})
@@ -504,7 +508,7 @@ def make_residual_ref(dados_csv: Path, bundle_dir: Path, alvos: list[str], predi
     ref = df[(df.index >= pd.Timestamp(ref_start)) & (df.index <= pd.Timestamp(ref_end))]
     dets = []
     for alvo in alvos:
-        det = ResidualLevelDetector(alvo, preditores).fit(ref)
+        det = ResidualLevelDetector(alvo, preditores, lado=lado).fit(ref)
         print(f"M8 {alvo}: R² {det.r2:.2f}, faixa normal do resíduo {det.band[0]:.1f} a {det.band[1]:.1f}"
               + ("   [aviso: R² < 0,5, a regressão explica pouco o sensor; prefira deixá-lo só no M6]" if det.r2 < 0.5 else ""))
         dets.append(det.to_dict())
@@ -546,6 +550,8 @@ def main():
                     help="só calibra e grava residual_ref.json (M8) no bundle (usa --dados + --bundle + --alvos + --preditores) e sai")
     ap.add_argument("--alvos", default=None, help="M8: temperaturas a monitorar, separadas por vírgula (ex.: 'Temperatura Bomba LA')")
     ap.add_argument("--preditores", default=None, help="M8: sensores que explicam o alvo (estação e carga), separados por vírgula")
+    ap.add_argument("--m8-lado", default="ambos", choices=["ambos", "acima", "abaixo"],
+                    help="M8: avisar quando a temperatura fica acima, abaixo ou fora (ambos) da faixa esperada")
     ap.add_argument("--ref-start", default=None); ap.add_argument("--ref-end", default=None)
     args = ap.parse_args()
 
@@ -555,7 +561,7 @@ def main():
         if not (args.alvos and args.preditores):
             raise SystemExit("--make-residual-ref precisa de --alvos e --preditores")
         make_residual_ref(Path(args.dados), Path(args.bundle), [a.strip() for a in args.alvos.split(",")],
-                          [p.strip() for p in args.preditores.split(",")], args.ref_start, args.ref_end); return 0
+                          [p.strip() for p in args.preditores.split(",")], args.ref_start, args.ref_end, args.m8_lado); return 0
     if not (args.inferencia and args.alarm):
         ap.error("--inferencia e --alarm são obrigatórios para monitorar")
 

@@ -167,8 +167,9 @@ python scripts/retrain_pipeline.py --equipment <EQUIP> --provisorio --train-star
 
 ## Situação atual do B-8802B
 
-- **Status: AMARELO pelo M8** desde 01/04/2026: a temperatura do mancal LA está ~6 °C abaixo do esperado desde
-  28/03/2026, logo depois de uma parada da bomba. O M6 não dispara. Pergunta em aberto à operação: o que foi feito
-  nas paradas de 17/03 (~00:30 às 09:30) e de 27/03/2026 (~08:30 às 14:30)?
+- **M8 só aquecimento (out/2026):** desde 01/04/2026 a temperatura do mancal LA está ~6 °C abaixo do esperado (depois
+  das paradas de 17/03 e 27/03/2026). Um mancal mais frio não indica falha, então o M8 do B-8802B passou a avisar só
+  quando o mancal esquenta (`"lado": "acima"` no `residual_ref.json`) e saiu do amarelo. Um aquecimento de +8 °C acima do
+  esperado é avisado em ~2 dias. A pergunta à operação sobre as paradas continua valendo, para registro.
 - **Dado congelado** (M7) em 02/01/2025, 15–23/05/2025 e 22/02–04/03/2026: vale a instrumentação verificar.
 - O `drift_ref.json` do bundle foi recalibrado em out/2026 (quantis, sem o dado congelado na referência).
