@@ -23,11 +23,16 @@ anterior (20/05/2022 a 17/04/2023), mesma regra de alarme (limiar μ+5σ, 15 de 
 | falha simulada (assinatura de 2023, 4 datas) | detecta todas, 10–14 h antes do fim da rampa | detecta todas, 5–11 h antes |
 | perda de sucção em 22/07/2022 (sucção ~1 bar) | **alerta** | não alerta |
 
-**O que fica fora do modelo e precisa de vigia simples:**
-- temperatura dos mancais → monitor (M8) ou limite de temperatura;
-- deslocamento axial → limite da instrumentação (sem ele, uma falha do mancal de escora não é vista);
-- subida moderada de vibração num só mancal → limite por sensor de vibração;
-- sensor travado → monitor de dado congelado (M7).
+**Escopo do modelo:** detectar a volta da falha registrada (quebra do acoplamento, 15/05/2023), que aparece como um
+salto forte na vibração do mancal LA do motor.
+
+**Fora do escopo do modelo (alarmes do supervisório / instrumentação):**
+- sensor zerado, travado ou com leitura impossível — alarme de instrumentação (o monitor semanal também aponta dado
+  congelado, M7);
+- limites de temperatura dos mancais e de deslocamento axial — alarmes de processo já configurados no supervisório
+  (sem o deslocamento axial no modelo, uma falha do mancal de escora fica com esses alarmes);
+- subida lenta e moderada de vibração num só mancal (degradação gradual) — o modelo não foi feito para isso; fica para
+  uma etapa futura.
 
 O monitor semanal (`monitor_drift.py`) já tem a referência deste modelo (`drift_ref.json`). Detalhes, gráficos e os 12
 candidatos: `notebooks/b6511502a/validacao_v2_b6511502a.ipynb` no repositório de modelos.

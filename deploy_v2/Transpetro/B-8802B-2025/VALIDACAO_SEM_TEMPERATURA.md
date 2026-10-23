@@ -33,8 +33,13 @@ e a troca só acontece com o aval do time de modelos. Para rodar o novo, aponte 
 - mancal +8 °C acima do esperado: aviso em ~2 dias;
 - até ~+6 °C: dentro da faixa normal.
 
-**Limites dos dois modelos, a cobrir com regras simples fora do modelo:**
-- **sensor de vibração zerado com a bomba operando** → regra de instrumentação;
-- **subida moderada de vibração num mancal** (+10% a +50%) → limite por sensor de vibração.
+**Escopo do modelo:** detectar a volta da falha registrada (trinca nas lâminas do acoplamento, 06/07/2022), que aparece
+como um salto forte na vibração dos mancais.
+
+**Fora do escopo dos dois modelos (alarmes do supervisório / instrumentação):**
+- sensor de vibração zerado, travado ou com leitura impossível — alarme de instrumentação (o monitor semanal também
+  aponta dado congelado, M7);
+- subida lenta e moderada de vibração num mancal (+10% a +50%, degradação gradual) — o modelo não foi feito para isso;
+  fica para uma etapa futura.
 
 Gráficos e detalhes: `notebooks/b8802b/validacao_sem_temperatura_b8802b.ipynb` e `notebooks/b8802b/lado_a_lado_sem_temperatura_b8802b.ipynb`.
