@@ -74,6 +74,45 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
     ],
 }
 
+MOTOR_LA, MOTOR_LNA = "B-4064A: Temperatura Mancal Motor LA", "B-4064A: Temperatura Mancal Motor LNA"
+BOMBA_LA, BOMBA_LNA = "B-4064A: Temperatura Mancal Bomba LA", "B-4064A: Temperatura Mancal Bomba LNA"
+TEMPS_TODAS = [MOTOR_LA, MOTOR_LNA, BOMBA_LA, BOMBA_LNA]
+
+STEP_RESIDUAL = {                      
+    "step": "residualize",
+    "targets": TEMPS_TODAS,
+    "regressors": ["B-4064A: Corrente", "B-4064A: Pressão Descarga", "B-4064A: Pressão Sucção"],
+    "windows_h": [3], "degree": 1, "suffix": "__resid",
+}
+
+STEP_SEM_TEMP = {"step": "drop_columns", "columns": TEMPS_TODAS}
+
+STEP_PARES = {                         
+    "step": "add_pair_deltas",
+    "pairs": [[MOTOR_LA, MOTOR_LNA], [BOMBA_LA, BOMBA_LNA]],
+    "mode": "abs", "drop_raw": True,
+}
+
+STEP_PARES_CRUZADO = {
+    "step": "add_pair_deltas",
+    "pairs": [[BOMBA_LA, MOTOR_LA], [BOMBA_LNA, MOTOR_LNA]],
+    "mode": "abs", "drop_raw": True,
+}
+
+def _inserir_passo(steps: list[dict], novo: dict) -> list[dict]:
+    steps = deepcopy(steps)
+    pos = next((i for i, s in enumerate(steps) if s["step"] in ("moving_average", "clip")), len(steps))
+    steps.insert(pos, deepcopy(novo))
+    return steps
+
+
+_VARIANTES = {"resid": STEP_RESIDUAL, "sem_temp": STEP_SEM_TEMP, "par": STEP_PARES, "par_cruzado": STEP_PARES_CRUZADO}
+
+for _k, _v in list(PREPROCESSING_PIPELINES.items()):
+    _base, _tipo = _k.rsplit("_", 1)
+    for _nome, _passo in _VARIANTES.items():
+        PREPROCESSING_PIPELINES[f"{_base}_{_nome}_{_tipo}"] = _inserir_passo(_v, _passo)
+
 RAW_PRESETS = {
     k: deepcopy(v)
     for k, v in PREPROCESSING_PIPELINES.items()
@@ -85,7 +124,6 @@ INTERPOLATED_PRESETS = {
     for k, v in PREPROCESSING_PIPELINES.items()
     if k.endswith("_interpolated")
 }
-
 
 EQUIPMENT_CONFIGS: dict[str, EquipmentConfig] = {
     "B-4064A": EquipmentConfig(

@@ -4,13 +4,29 @@ import numpy as np
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from skimage.filters import threshold_otsu
+from itertools import combinations_with_replacement
 
+@dataclass
+class ResidualModel:
+    targets: list
+    regressors: list
+    windows_h: list
+    degree: int
+    suffix: str
+    drop_raw: bool
+    mu: np.ndarray
+    sd: np.ndarray
+    lo: np.ndarray | None
+    hi: np.ndarray | None
+    coef: np.ndarray
+    drop_inputs: list | None = None
 
 @dataclass
 class PreprocessingArtifacts:
     scaler: object | None = None
     clip_bounds: dict | None = None
     knn_imputer: KNNImputer | None = None
+    residual_model: ResidualModel | None = None
 
 
 @dataclass
@@ -20,6 +36,100 @@ class PreprocessingReport:
     missing_before: int
     missing_after: int
 
+def _residual_base_features(df, regressors, windows_h):
+    cols = {}
+    for r in regressors:
+        x = df[r].astype(float)
+        cols[r] = x
+        for w in windows_h:  # média móvel causal por TEMPO (robusta a buracos do filter_running)
+            cols[f"{r}__mean{w:g}h"] = x.rolling(f"{int(round(w * 60))}min", min_periods=1).mean()
+    return pd.DataFrame(cols, index=df.index)
+
+
+def _expand_poly(Z, degree):
+    if degree == 1:
+        return Z
+    if degree == 2:
+        extra = [Z[:, i] * Z[:, j] for i, j in combinations_with_replacement(range(Z.shape[1]), 2)]
+        return np.column_stack([Z] + extra)
+    raise ValueError("degree deve ser 1 ou 2")
+
+
+def fit_residual_model(df, targets, regressors, windows_h=(3,), degree=1, alpha=1e-3, suffix="__resid", drop_raw=True, clip_regressors=None, min_rows=48, drop_inputs=None):
+    targets, regressors = list(targets), list(regressors)
+    faltam = [c for c in targets + regressors if c not in df.columns]
+    if faltam:
+        raise ValueError(f"residualize: colunas ausentes: {faltam}")
+    if set(targets) & set(regressors):
+        raise ValueError("residualize: um alvo não pode ser regressor de si mesmo.")
+    X = _residual_base_features(df, regressors, windows_h)
+    Y = df[targets].astype(float)
+    ok = (X.notna().all(axis=1) & Y.notna().all(axis=1)).to_numpy()
+    if ok.sum() < min_rows:
+        raise ValueError(f"residualize: só {int(ok.sum())} linhas válidas para ajustar (mín {min_rows}).")
+    Xv, Yv = X.to_numpy()[ok], Y.to_numpy()[ok]
+    if clip_regressors is None:
+        clip_regressors = degree > 1
+    lo, hi = ((np.percentile(Xv, 0.5, axis=0), np.percentile(Xv, 99.5, axis=0))
+              if clip_regressors else (None, None))
+    if clip_regressors:
+        Xv = np.clip(Xv, lo, hi)
+    mu, sd = Xv.mean(axis=0), Xv.std(axis=0)
+    sd[sd == 0] = 1.0
+    A = np.column_stack([np.ones(len(Xv)), _expand_poly((Xv - mu) / sd, degree)])
+    reg = alpha * len(A) * np.eye(A.shape[1])
+    reg[0, 0] = 0.0
+    coef = np.linalg.solve(A.T @ A + reg, A.T @ Yv)
+    return ResidualModel(targets, regressors, list(windows_h), degree, suffix, drop_raw,
+                         mu, sd, lo, hi, coef, drop_inputs=list(drop_inputs or []))
+
+def drop_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Remove colunas (ignora as que não existem)."""
+    return df.drop(columns=[c for c in columns if c in df.columns])
+
+
+def add_pair_deltas(df, pairs, mode="abs", drop_raw=True, min_ref_abs=1.0):
+    """Diferença entre sensores de cada par: (a, b) -> a - b. Sem parâmetros ajustados."""
+    cols = [c for p in pairs for c in p]
+    faltam = [c for c in cols if c not in df.columns]
+    if faltam:
+        raise ValueError(f"add_pair_deltas: colunas ausentes: {faltam}")
+    if mode not in ("abs", "pct", "both"):
+        raise ValueError("mode deve ser 'abs', 'pct' ou 'both'")
+    out = df.copy()
+    for a, b in pairs:
+        d = df[a].astype(float) - df[b].astype(float)
+        base = f"{a}__menos__{b}"
+        if mode in ("abs", "both"):
+            out[f"{base}__abs"] = d
+        if mode in ("pct", "both"):
+            ref = df[b].astype(float).where(df[b].abs() >= min_ref_abs)
+            out[f"{base}__pct"] = 100.0 * d / ref.abs()
+    if drop_raw:
+        out = out.drop(columns=list(dict.fromkeys(cols)))
+    return out.dropna()
+
+def apply_residual_model(df, m: ResidualModel):
+    faltam = [c for c in m.targets + m.regressors if c not in df.columns]
+    if faltam:
+        raise ValueError(f"residualize: colunas ausentes: {faltam}")
+    Xv = _residual_base_features(df, m.regressors, m.windows_h).to_numpy()
+    if m.lo is not None:
+        Xv = np.clip(Xv, m.lo, m.hi)
+    A = np.column_stack([np.ones(len(Xv)), _expand_poly((Xv - m.mu) / m.sd, m.degree)])
+    pred = A @ m.coef
+    out = df.copy()
+    novas = []
+    for j, t in enumerate(m.targets):
+        out[t + m.suffix] = df[t].astype(float).to_numpy() - pred[:, j]
+        novas.append(t + m.suffix)
+    if m.drop_raw:
+        out = out.drop(columns=m.targets)
+    
+    sobras = [c for c in (m.drop_inputs or []) if c in out.columns]
+    if sobras:
+        out = out.drop(columns=sobras)
+    return out.dropna(subset=novas)
 
 def filter_running(df: pd.DataFrame, column: str, threshold: float) -> pd.DataFrame:
     """Remove rows where pump is considered off (column value below threshold).
@@ -377,6 +487,14 @@ def run_preprocessing(
             df, artifacts.knn_imputer = knn_impute(df, imputer=artifacts.knn_imputer, **params)
         elif step == "remove_sensor_errors":
             df = remove_sensor_errors(df, **params)
+        elif step == "residualize":
+            if artifacts.residual_model is None:         
+                artifacts.residual_model = fit_residual_model(df, **params)
+            df = apply_residual_model(df, artifacts.residual_model)
+        elif step == "drop_columns":
+            df = drop_columns(df, **params)
+        elif step == "add_pair_deltas":
+            df = add_pair_deltas(df, **params)
         else:
             raise ValueError(f"Unknown preprocessing step: '{step}'")
 

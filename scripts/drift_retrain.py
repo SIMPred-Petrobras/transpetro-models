@@ -134,7 +134,7 @@ DEFAULT_MIN_DIAS_REGIME_NOVO = 21
 DEFAULT_BUFFER_TRANSICAO_DIAS = 2
 DEFAULT_LIMITE_LEVE = 1.5
 DEFAULT_FATOR_NIVEL_NORMAL = 1.1
-DEG_PADROES_DEFAULT = ("B-4064A: Vib Mancal Bomba LNA", "B-4064A: Temperatura Mancal Motor LNA")
+DEG_PADROES_DEFAULT = ("B-4064A: Vib Mancal Bomba LNA",)
 REGIME_COL_DEFAULT = "B-4064A: Corrente"                  
 REGIME_COLS_DEFAULT = (REGIME_COL_DEFAULT,) 
 
@@ -1647,6 +1647,13 @@ def main():
     args.regime_cols = reconstruir_nomes(args.regime_cols, df_pre.columns, exato=True)
     args.deg_patterns = reconstruir_nomes(args.deg_patterns, df_pre.columns, exato=False)
     print(f"  Variáveis de regime: {args.regime_cols}\n  Padrões de desgaste: {args.deg_patterns}")
+
+    deg_cols = sensores_degradacao(df_pre.columns, args.deg_patterns)
+    print(f"  Colunas tratadas como desgaste: {deg_cols}")
+    n_temp = [c for c in deg_cols if "temperatura" in str(c).lower()]
+    if len(n_temp) != 1:
+        print(f"  [aviso] esperado 1 temperatura de degradação, casou {len(n_temp)}: {n_temp}")
+        
     for c in args.regime_cols:
         if c not in df_pre.columns:
             sug = difflib.get_close_matches(c, [str(x) for x in df_pre.columns], n=3, cutoff=0.5)
