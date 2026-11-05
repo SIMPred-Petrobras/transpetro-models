@@ -54,8 +54,12 @@ def _expand_poly(Z, degree):
         return np.column_stack([Z] + extra)
     raise ValueError("degree deve ser 1 ou 2")
 
+def _solve(A, Y, alpha):
+    reg = alpha * len(A) * np.eye(A.shape[1])
+    reg[0, 0] = 0.0
+    return np.linalg.solve(A.T @ A + reg, A.T @ Y)
 
-def fit_residual_model(df, targets, regressors, windows_h=(3,), degree=1, alpha=1e-3, suffix="__resid", drop_raw=True, clip_regressors=None, min_rows=48, drop_inputs=None):
+def fit_residual_model(df, targets, regressors, windows_h=(3,), degree=1, alpha=1e-3, suffix="__resid", drop_raw=True, clip_regressors=None, min_rows=48, drop_inputs=None, trim_k=None, trim_iter=3):
     targets, regressors = list(targets), list(regressors)
     faltam = [c for c in targets + regressors if c not in df.columns]
     if faltam:
@@ -77,9 +81,19 @@ def fit_residual_model(df, targets, regressors, windows_h=(3,), degree=1, alpha=
     mu, sd = Xv.mean(axis=0), Xv.std(axis=0)
     sd[sd == 0] = 1.0
     A = np.column_stack([np.ones(len(Xv)), _expand_poly((Xv - mu) / sd, degree)])
-    reg = alpha * len(A) * np.eye(A.shape[1])
-    reg[0, 0] = 0.0
-    coef = np.linalg.solve(A.T @ A + reg, A.T @ Yv)
+    coef = _solve(A, Yv, alpha)
+    if trim_k:
+        keep = np.ones(len(A), dtype=bool)
+        for _ in range(trim_iter):
+            res = Yv - A @ coef
+            med = np.median(res[keep], axis=0)
+            mad = 1.4826 * np.median(np.abs(res[keep] - med), axis=0)
+            mad[mad == 0] = 1.0
+            novo = (np.abs(res - med) / mad <= trim_k).all(axis=1)
+            if novo.mean() < 0.7 or (novo == keep).all(): 
+                break
+            keep = novo
+            coef = _solve(A[keep], Yv[keep], alpha)
     return ResidualModel(targets, regressors, list(windows_h), degree, suffix, drop_raw,
                          mu, sd, lo, hi, coef, drop_inputs=list(drop_inputs or []))
 
@@ -87,6 +101,22 @@ def drop_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     """Remove colunas (ignora as que não existem)."""
     return df.drop(columns=[c for c in columns if c in df.columns])
 
+def add_rolling_dispersion(df, columns, window_h=6.0, stats=("std",), min_periods=6, drop_raw=False):
+    """Dispersão causal por TEMPO (std e/ou amplitude) em janela móvel."""
+    faltam = [c for c in columns if c not in df.columns]
+    if faltam:
+        raise ValueError(f"add_rolling_dispersion: colunas ausentes: {faltam}")
+    out = df.copy()
+    w = f"{int(round(window_h * 60))}min"
+    for c in columns:
+        r = df[c].astype(float).rolling(w, min_periods=min_periods)
+        if "std" in stats:
+            out[f"{c}__std{window_h:g}h"] = r.std()
+        if "amp" in stats:
+            out[f"{c}__amp{window_h:g}h"] = r.max() - r.min()
+    if drop_raw:
+        out = out.drop(columns=columns)
+    return out.dropna()
 
 def add_pair_deltas(df, pairs, mode="abs", drop_raw=True, min_ref_abs=1.0):
     """Diferença entre sensores de cada par: (a, b) -> a - b. Sem parâmetros ajustados."""
@@ -303,44 +333,56 @@ def add_rolling_features(
     windows: list[int] | None = None,
     include_diff: bool = True,
     columns: list[str] | None = None,
+    column_patterns: list[str] | None = None,   # NOVO
+    by_time: bool = False,                      # NOVO
+    max_gap_h: float | None = None,             # NOVO
 ) -> pd.DataFrame:
     """
-    Adiciona features de janela deslizante causal (média, desvio padrão, diff) lado a lado
-    com as colunas originais.
-
-    Parâmetros
-    ----------
-    windows : list[int]
-        Tamanhos das janelas em número de períodos. Ex.: [6, 24] para dados horários
-        equivale a 6 h e 24 h. Default: [6, 24].
-    include_diff : bool
-        Se True, inclui a primeira diferença (taxa de mudança) de cada sensor.
-    columns : list[str] | None
-        Colunas a expandir. Default: todas.
-
+    Features de janela deslizante causal (média, desvio padrão, diff) ao lado das originais.
+ 
+    windows : tamanhos das janelas. Em número de linhas (by_time=False) ou em HORAS (by_time=True).
+    columns : nomes exatos a expandir. Default: todas.
+    column_patterns : alternativa a `columns`: expande as colunas cujo nome contém algum destes
+        trechos (sem diferenciar maiúsculas). Ex.: ["Vib"].
+    by_time : janela por TEMPO (ex.: 24 h reais), e não por nº de linhas. Recomendado depois de
+        filter_running, que apaga as horas com a bomba desligada: 24 linhas podem cobrir dias.
+    max_gap_h : com by_time, o diff vira NaN (e a linha é descartada) quando a linha anterior está
+        a mais de max_gap_h horas; evita o salto de religar a bomba virar "taxa de variação".
+ 
     Notas
     -----
-    - Usa rolling causal (center=False), sem look-ahead.
-    - Linhas com NaN gerados no início de cada janela são removidas via dropna().
-    - Aplique este passo ANTES do clip/normalize no preset para que os limites
-      de clipping sejam calculados sobre as features enriquecidas.
-    - Em val/test o mesmo conjunto de colunas que o train produz é gerado, pois
-      a lista de colunas é derivada dos dados de entrada.
+    - Causal (sem look-ahead). Linhas com NaN no início das janelas são removidas (dropna).
+    - Uma janela de W horas precisa de >= W horas de contexto antes de cada chunk no walk-forward
+      (o drift_triggered_retrain ajusta o --lookback-horas sozinho; ver lookback_minimo_horas).
     """
     if windows is None:
         windows = [6, 24]
     if columns is None:
         columns = list(df.columns)
-
+    if column_patterns:
+        pats = [str(p).lower() for p in column_patterns]
+        columns = [c for c in columns if any(p in str(c).lower() for p in pats)]
+        if not columns:
+            raise ValueError(f"add_rolling_features: nenhuma coluna casa com {column_patterns}")
+ 
     df = df.copy()
+    novas = {}
+    if by_time and max_gap_h is not None:
+        gap_h = df.index.to_series().diff().dt.total_seconds().to_numpy() / 3600.0
     for col in columns:
+        x = df[col]
         for w in windows:
-            min_p = max(2, w // 2)
-            df[f"{col}__std{w}"] = df[col].rolling(w, min_periods=min_p).std()
-            df[f"{col}__mean{w}"] = df[col].rolling(w, min_periods=min_p).mean()
+            min_p = max(2, int(w) // 2)
+            r = (x.rolling(f"{int(round(w * 60))}min", min_periods=min_p) if by_time
+                 else x.rolling(w, min_periods=min_p))
+            novas[f"{col}__std{w}"] = r.std()
+            novas[f"{col}__mean{w}"] = r.mean()
         if include_diff:
-            df[f"{col}__diff"] = df[col].diff()
-
+            d = x.diff()
+            if by_time and max_gap_h is not None:
+                d = d.where(gap_h <= max_gap_h)
+            novas[f"{col}__diff"] = d
+    df = pd.concat([df, pd.DataFrame(novas, index=df.index)], axis=1)
     return df.dropna()
 
 def normalize(
@@ -425,6 +467,7 @@ def run_preprocessing(
     fitted_scaler=None,
     fitted_clip_bounds=None,
     fitted_knn_imputer: KNNImputer | None = None,
+    residual_override: "ResidualModel | None" = None,
     return_artifacts: bool = False,
     return_report: bool = False,
 ):
@@ -488,11 +531,17 @@ def run_preprocessing(
         elif step == "remove_sensor_errors":
             df = remove_sensor_errors(df, **params)
         elif step == "residualize":
-            if artifacts.residual_model is None:         
-                artifacts.residual_model = fit_residual_model(df, **params)
-            df = apply_residual_model(df, artifacts.residual_model)
+            frozen = params.pop("frozen", False)             # NOVO: opção do passo
+            if artifacts.residual_model is None:             # treino da era: ajusta
+                if frozen and residual_override is not None:
+                    artifacts.residual_model = residual_override   # reaproveita o do baseline
+                else:
+                    artifacts.residual_model = fit_residual_model(df, **params)
+            df = apply_residual_model(df, artifacts.residual_model)   # depois: congelado
         elif step == "drop_columns":
             df = drop_columns(df, **params)
+        elif step == "add_rolling_dispersion":
+            df = add_rolling_dispersion(df, **params)
         elif step == "add_pair_deltas":
             df = add_pair_deltas(df, **params)
         else:

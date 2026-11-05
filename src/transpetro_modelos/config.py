@@ -77,42 +77,79 @@ PREPROCESSING_PIPELINES:dict[str, list[dict]] = {
 MOTOR_LA, MOTOR_LNA = "B-4064A: Temperatura Mancal Motor LA", "B-4064A: Temperatura Mancal Motor LNA"
 BOMBA_LA, BOMBA_LNA = "B-4064A: Temperatura Mancal Bomba LA", "B-4064A: Temperatura Mancal Bomba LNA"
 TEMPS_TODAS = [MOTOR_LA, MOTOR_LNA, BOMBA_LA, BOMBA_LNA]
+VIB_BOMBA_LNA = "B-4064A: Vib Mancal Bomba LNA"
+VIBS = [VIB_BOMBA_LNA]
+AMBIENTE = None
+REGRESSORES = ["B-4064A: Corrente", "B-4064A: Pressão Descarga", "B-4064A: Pressão Sucção"] + ([AMBIENTE] if AMBIENTE else [])
 
-STEP_RESIDUAL = {                      
-    "step": "residualize",
-    "targets": TEMPS_TODAS,
-    "regressors": ["B-4064A: Corrente", "B-4064A: Pressão Descarga", "B-4064A: Pressão Sucção"],
-    "windows_h": [3], "degree": 1, "suffix": "__resid",
-}
+
+def _residual(targets, **extra):
+    return {"step": "residualize", "targets": targets, "regressors": REGRESSORES,
+            "windows_h": [3], "degree": 1, "suffix": "__resid",
+            "clip_regressors": True, "trim_k": 3.0, **extra}
+
+
+STEP_RESIDUAL = _residual(TEMPS_TODAS)
+STEP_RESIDUAL_TV = _residual(TEMPS_TODAS + VIBS)
+STEP_DISP = {"step": "add_rolling_dispersion",
+             "columns": [c + "__resid" for c in TEMPS_TODAS + VIBS],
+             "window_h": 6.0, "stats": ["std"], "drop_raw": False}
 
 STEP_SEM_TEMP = {"step": "drop_columns", "columns": TEMPS_TODAS}
 
-STEP_PARES = {                         
-    "step": "add_pair_deltas",
-    "pairs": [[MOTOR_LA, MOTOR_LNA], [BOMBA_LA, BOMBA_LNA]],
-    "mode": "abs", "drop_raw": True,
-}
+STEP_PARES = {"step": "add_pair_deltas",
+              "pairs": [[MOTOR_LA, MOTOR_LNA], [BOMBA_LA, BOMBA_LNA]],
+              "mode": "abs", "drop_raw": True}
+STEP_PARES_CRUZADO = {"step": "add_pair_deltas",
+                      "pairs": [[BOMBA_LA, MOTOR_LA], [BOMBA_LNA, MOTOR_LNA]],
+                      "mode": "abs", "drop_raw": True}
 
-STEP_PARES_CRUZADO = {
-    "step": "add_pair_deltas",
-    "pairs": [[BOMBA_LA, MOTOR_LA], [BOMBA_LNA, MOTOR_LNA]],
-    "mode": "abs", "drop_raw": True,
-}
+STEP_DROP_LA = {"step": "drop_columns", "columns": [MOTOR_LA, BOMBA_LA]}
+STEP_PAR_CRUZADO_LNA = {"step": "add_pair_deltas",
+                        "pairs": [[BOMBA_LNA, MOTOR_LNA]], "mode": "abs", "drop_raw": True}
 
-def _inserir_passo(steps: list[dict], novo: dict) -> list[dict]:
+STEP_RESIDUAL_VIB = _residual(VIBS, drop_inputs=REGRESSORES)
+
+
+def _inserir_passo(steps: list[dict], novo) -> list[dict]:
     steps = deepcopy(steps)
+    novos = deepcopy(novo if isinstance(novo, list) else [novo])
     pos = next((i for i, s in enumerate(steps) if s["step"] in ("moving_average", "clip")), len(steps))
-    steps.insert(pos, deepcopy(novo))
+    steps[pos:pos] = novos
     return steps
 
 
-_VARIANTES = {"resid": STEP_RESIDUAL, "sem_temp": STEP_SEM_TEMP, "par": STEP_PARES, "par_cruzado": STEP_PARES_CRUZADO}
+INCLUIR_RESID_CONGELADO = True
+STEP_RESIDUAL_CONGELADO = {**STEP_RESIDUAL, "frozen": True}
+
+STEP_VIB_FEATS = {"step": "add_rolling_features", "windows": [6, 24], "include_diff": True,
+                  "column_patterns": ["Vib"], "by_time": True, "max_gap_h": 1.5}
+STEP_VIB_FEATS_LONGO = {**STEP_VIB_FEATS, "windows": [6, 24, 72, 168]}
+_FEATS = {"vibf": STEP_VIB_FEATS, "vibfl": STEP_VIB_FEATS_LONGO}
+
+_VARIANTES = {
+    "resid": [STEP_RESIDUAL],
+    "resid_tv": [STEP_RESIDUAL_TV],
+    "resid_tv_disp": [STEP_RESIDUAL_TV, STEP_DISP],
+    "sem_temp": [STEP_SEM_TEMP],
+    "par": [STEP_PARES],
+    "par_cruzado": [STEP_PARES_CRUZADO],
+    "par_cruzado_lna": [STEP_DROP_LA, STEP_PAR_CRUZADO_LNA],    
+    "vib_resid": [STEP_SEM_TEMP, STEP_RESIDUAL_VIB],         
+}
+if INCLUIR_RESID_CONGELADO:
+    _VARIANTES["resid_congelado"] = [STEP_RESIDUAL_CONGELADO]
 
 for _k, _v in list(PREPROCESSING_PIPELINES.items()):
     _base, _tipo = _k.rsplit("_", 1)
+    for _fn, _fp in _FEATS.items():                                 
+        PREPROCESSING_PIPELINES[f"{_base}_{_fn}_{_tipo}"] = _inserir_passo(_v, _fp)
     for _nome, _passo in _VARIANTES.items():
-        PREPROCESSING_PIPELINES[f"{_base}_{_nome}_{_tipo}"] = _inserir_passo(_v, _passo)
-
+        _s = _inserir_passo(_v, _passo)
+        PREPROCESSING_PIPELINES[f"{_base}_{_nome}_{_tipo}"] = _s
+        for _fn, _fp in _FEATS.items():
+            PREPROCESSING_PIPELINES[f"{_base}_{_nome}_{_fn}_{_tipo}"] = _inserir_passo(_s, _fp)
+        
 RAW_PRESETS = {
     k: deepcopy(v)
     for k, v in PREPROCESSING_PIPELINES.items()

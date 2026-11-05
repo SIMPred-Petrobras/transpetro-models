@@ -4,88 +4,13 @@ drift_triggered_retrain.py
 Simula, sobre o histórico, o CICLO DE PRODUÇÃO do monitoramento: chegam dados
 novos (um chunk por vez, default 1 dia) e, a cada chunk, o sistema
 
-    1. PONTUA os dados novos com o modelo vigente (erro de reconstrução);
-    2. DETECTA ANOMALIA/FALHA: limiar (média + N·desvio da referência) com
-       persistência k-de-n. Isso roda SEMPRE, em paralelo ao drift, e gera os
-       episódios de anomalia (alertas_anomalia_*.csv);
-    3. DETECTA DRIFT no erro com o detector escolhido (KS, KS calibrado, PSI,
-       Page-Hinkley, CUSUM, ADWIN-lite) e só CONFIRMA o drift se ele persistir
-       (>= --confirm-disparos disparos espalhados por >= --confirm-dias dias) e
-       a era tiver idade mínima;
-    4. Drift confirmado -> DIAGNÓSTICO NA JANELA DO REGIME NOVO "falha × regime":
-         a) estima QUANDO o regime mudou (CUSUM) e usa a janela dali em diante;
-         b) ajusta sensor ~ variáveis de regime (--regime-cols, uma ou várias) na janela
-            de treino da era e olha o RESÍDUO do sensor no regime novo (degrau / rampa /
-            estável). Se o regime novo está fora da faixa vista no treino (extrapolação),
-            o ajuste linear é menos confiável e o limiar do resíduo sobe
-            (--extrap-resid-fator);
-         c) GATE: bloqueia a adaptação (retreino E recalibração) se
-              - um sensor físico mudou além do que o regime explica, ou
-              - há anomalia ativa e NENHUMA variável de regime mudou.
-            Anomalia ativa COM mudança de regime acompanhada pelos sensores não bloqueia.
-            Depois de --teto-bloqueio-dias em bloqueio, o evento é ESCALADO À OPERAÇÃO
-            (continua sem adaptar sozinho).
-         d) regime novo com < --min-dias-regime-novo dias -> ADIA (sem zerar o detector).
-            Com < --min-dias-diagnostico dias não há como separar falha de regime: também
-            ADIA (diagnostico_pendente), em vez de bloquear pela tendência de 30 dias.
-            Enquanto o MESMO drift segue adiado, o drift_events mantém UMA linha
-            (n_chunks_adiado), em vez de uma por dia.
-    5. Mudança de conceito -> escolha da AÇÃO, do mais barato ao mais caro:
-         - drift LEVE (erro mediano do regime novo <= --limite-leve x a MEDIANA da
-           referência): só RECALIBRA a régua (limiar + referência do detector), com as
-           anomalias removidas dos erros usados;
-         - drift forte: RETREINA a partir do ponto de mudança (sem os episódios
-           curtos de anomalia e sem os últimos --quarentena-dias dias) e só ACEITA o
-           modelo novo se ele reduzir o erro, medido numa janela que ele NÃO usou no
-           treino e em escala relativa à própria referência de cada modelo, em
-           >= --min-ganho-retreino vezes; senão REJEITA e mantém o atual.
-
-Critério de "o erro voltou ao normal" (descarta alarme falso e a persistência do ADWIN):
-mediana recente <= --fator-nivel-normal x mediana da referência. É a mesma base
-(mediana) da decisão de recalibração.
-
-Cada chunk recebe um status (verde / amarelo / vermelho) em chunk_log_*.csv. Anomalia
-ativa no chunk deixa o chunk vermelho, independente do detector de drift.
-
-Contaminação: cada retreino/recalibração registra no retrain_log a fração do treino
-que estava acima do limiar / em anomalia / em janela de prefalha e a razão do limiar
-novo contra o baseline e contra a era anterior (limiares em unidades da mediana da
-própria referência, para não depender da escala do scaler de cada era).
-
-Os episódios curtos de anomalia são removidos do treino DEPOIS do preprocessing
-(a fatia é pré-processada contínua; assim rolling/lags não costuram datas separadas
-por um buraco).
-
-Controle: para cada (modelo, preset) roda também o baseline CONGELADO (sem adaptação)
-com a mesma persistência e a mesma pontuação; entra no resumo como detector
-"sem_adaptacao", e as demais linhas ganham delta_composite_vs_controle.
-
-O baseline inicial é treinado UMA vez por (modelo, preset) e compartilhado entre
-os detectores (comparação justa e bem mais rápido). Com --controle-fim e
---drift-time o script também mede, sobre esse baseline, falsos alarmes e atraso
-de detecção de cada detector (drift_benchmark.run_drift_benchmark) e junta no
-resumo.
-
-Pontuação final: as MESMAS funções do automl_anomaly_v3.py
-(compute_balanced_score_multi_failure / compute_balanced_score). Atenção: a
-série pontuada começa depois da janela do baseline inicial.
-
-Saídas por (modelo, preset, detector), em <output-dir>/<equip>_<data>/:
-    retrain_log_*.csv      baseline, retreinos e recalibrações (uma por linha) + contaminação
-    drift_events_*.csv     um drift confirmado por linha, com diagnóstico e decisão
-    chunk_log_*.csv        status (semáforo) de cada chunk
-    alertas_anomalia_*.csv episódios de anomalia (início, fim, pico x limiar)
-    full_scores_*.parquet  série completa
-    timeline_*.png         gráfico (erro, threshold, anomalias, falha real, mudança de conceito)
-Consolidadas: resumo_tecnicas.csv (e resumo_parcial.csv durante a execução),
-benchmark_<modelo>_<preset>.csv, timeline_comparativa_*.png
-
 Uso:
     python scripts/drift_triggered_retrain.py \
         --equipment x --local-data --no-clearml \
         --models dense --presets baseline \
         --detectors cusum ks_calibrado adwin_lite \
         --regime-cols Corrente \
+        --deg-patterns Vib "Temperatura Mancal" \
         --initial-train-days 60 \
         --controle-fim 2025-06-30 --drift-time 2025-09-01 --drift-time 2026-02-01
 """
@@ -135,8 +60,8 @@ DEFAULT_BUFFER_TRANSICAO_DIAS = 2
 DEFAULT_LIMITE_LEVE = 1.5
 DEFAULT_FATOR_NIVEL_NORMAL = 1.1
 DEG_PADROES_DEFAULT = ("B-4064A: Vib Mancal Bomba LNA",)
-REGIME_COL_DEFAULT = "B-4064A: Corrente"                  
-REGIME_COLS_DEFAULT = (REGIME_COL_DEFAULT,) 
+REGIME_COL_DEFAULT = "B-4064A: Corrente"
+REGIME_COLS_DEFAULT = (REGIME_COL_DEFAULT,)
 
 
 def set_seed(seed: int) -> None:
@@ -364,6 +289,8 @@ def diagnosticar_drift(
 
     tend: dict[str, dict] = {}
     for c in sensores_degradacao(dia.columns, padroes):
+        if c in regime_cols:       
+            continue
         serie = dia[c].dropna()
         y = serie.tail(janela_dias)
         if len(y) < 15:
@@ -373,9 +300,11 @@ def diagnosticar_drift(
         subindo = float((y.diff().dropna() > 0).mean())
         var_rel = slope * len(y) / std_ref
         monot = abs(var_rel) >= slope_rel_min and (subindo > 0.65 or subindo < 0.35)
-        tend[c] = {"slope_dia": slope, "variacao_rel": var_rel,
-                   "consistencia": subindo, "monotonica": bool(monot)}
-    subindo_fisico = sorted(c for c, v in tend.items() if v["monotonica"] and v["slope_dia"] > 0)
+        tend[c] = {"slope_dia": slope, "variacao_rel": var_rel, "consistencia": subindo, "monotonica": bool(monot)}
+    mono = sorted(
+        f"{c} ({'↑' if v['slope_dia'] > 0 else '↓'})"
+        for c, v in tend.items() if v["monotonica"]
+    )
 
     corr = np.nan
     err_d = hist["reconstruction_error"].resample("D").median()
@@ -386,7 +315,7 @@ def diagnosticar_drift(
         if len(j) >= 10:
             c_ = float(j.iloc[:, 0].corr(j.iloc[:, 1]))
             if np.isnan(corr) or abs(c_) > abs(corr):
-                corr = c_       
+                corr = c_
 
     fora_clip = np.nan
     cb = getattr(artifacts, "clip_bounds", None)
@@ -401,8 +330,8 @@ def diagnosticar_drift(
     n_ep = 0 if len(al) == 0 else 1 + int((pd.Series(al).diff() > pd.Timedelta(hours=12)).sum())
 
     return {
-        "conclusao": "possivel_degradacao" if subindo_fisico else "drift_provavel",
-        "sensores_subindo": ", ".join(subindo_fisico),
+        "conclusao": "possivel_degradacao" if mono else "drift_provavel",
+        "sensores_subindo": ", ".join(mono),   # nome mantido por compatibilidade; agora inclui ↑/↓
         "n_sensores_avaliados": len(tend),
         "corr_erro_regime": corr,
         "acompanha_regime": bool(abs(corr) > 0.3) if corr == corr else False,
@@ -458,7 +387,7 @@ def avaliar_regime_novo(
 
     detalhes: dict[str, dict] = {}
     for c in ref.columns:
-        if c in reg or c not in novo.columns: 
+        if c in reg or c not in novo.columns:
             continue
         if not any(p.lower() in str(c).lower() for p in padroes):
             continue
@@ -485,26 +414,30 @@ def avaliar_regime_novo(
         if len(d) >= 7:
             slope = float(theilslopes(d.to_numpy(), np.arange(len(d)))[0])
             tend = slope * len(d) / sd_res
-        if resid_med >= resid_lim:
-            forma = "rampa" if tend >= tend_min else "degrau"
-        elif tend >= tend_min:
+        # Módulo: queda de temperatura/vibração também conta como desvio do previsto.
+        # "rampa" exige tendência no MESMO sentido do degrau (senão é degrau + deriva contrária).
+        mesmo_sentido = np.sign(tend) == np.sign(resid_med)
+        if abs(resid_med) >= resid_lim:
+            forma = "rampa" if (abs(tend) >= tend_min and mesmo_sentido) else "degrau"
+        elif abs(tend) >= tend_min:
             forma = "rampa_incipiente"
         else:
             forma = "estavel"
         detalhes[c] = {"resid_sd": resid_med, "tend_sd": float(tend), "forma": forma,
-                       "fora": bool(resid_med >= resid_lim or tend >= tend_min)}
+                       "sentido": "alta" if resid_med >= 0 else "queda",
+                       "fora": bool(abs(resid_med) >= resid_lim or abs(tend) >= tend_min)}
 
     fora = sorted(c for c, v in detalhes.items() if v["fora"])
     cand = fora or list(detalhes)
-    pior = max(cand, key=lambda c: detalhes[c]["resid_sd"]) if cand else None
+    pior = max(cand, key=lambda c: abs(detalhes[c]["resid_sd"])) if cand else None
     return {
         "delta_regime_sd": float(delta_max),
         "deltas_regime": deltas,
         "regimes_mudaram": mudaram,
         "regime_mudou": regime_mudou,
         "sensores_fora": fora,
-        "resid_max_sd": float(max((v["resid_sd"] for v in detalhes.values()), default=float("nan"))),
-        "tend_max_sd": float(max((v["tend_sd"] for v in detalhes.values()), default=float("nan"))),
+        "resid_max_sd": float(max((abs(v["resid_sd"]) for v in detalhes.values()), default=float("nan"))),
+        "tend_max_sd": float(max((abs(v["tend_sd"]) for v in detalhes.values()), default=float("nan"))),
         "forma": detalhes[pior]["forma"] if pior else "sem_sensor",
         "explicada_por_regime": bool(regime_mudou and not fora),
         "extrapolacao": extrapolacao,
@@ -560,11 +493,11 @@ def decidir_recalibracao(
 class Era:
     model: Any
     artifacts: Any
-    ref_errors: np.ndarray  
+    ref_errors: np.ndarray
     threshold: float
-    val_index: pd.Index   
-    val_errors: np.ndarray 
-    train_ini: Any = None 
+    val_index: pd.Index
+    val_errors: np.ndarray
+    train_ini: Any = None
     train_fim: Any = None
     train_index: Any = None
     n_excluidas: int = 0
@@ -605,8 +538,8 @@ class Params:
     prefailure_days: int = 30
     gate_anomalia: bool = True
     gate_janela_dias: int = 7
-    gate_exceeds_pct: float = 3.0      
-    teto_bloqueio_dias: int = 45    
+    gate_exceeds_pct: float = 3.0
+    teto_bloqueio_dias: int = 45
     max_frac_filtrada_recal: float = 0.4
     quarentena_dias: int = 2
     min_dias_diagnostico: int = 7
@@ -615,7 +548,7 @@ class Params:
     tend_min: float = 2.0
     extrap_resid_fator: float = 2.0
     gate_continuo: bool = True
-    persist_contexto_n: int = 2 
+    persist_contexto_n: int = 2
     limiar_robusto: bool = False
     limiar_mad: float = 6.0
 
@@ -661,10 +594,9 @@ def treinar_era(
     excluir: list | None = None,
     robusto: bool = False,
     n_mad: float = 6.0,
+    residual_base=None,
 ) -> Era:
-    train_df, artifacts, _ = run_preprocessing(
-        df_slice, steps, return_artifacts=True, return_report=True
-    )
+    train_df, artifacts, _ = run_preprocessing(df_slice, steps, return_artifacts=True, return_report=True, residual_override=residual_base)
     train_df, n_excl = excluir_intervalos(train_df, excluir)
     if len(train_df) < 50:
         raise ValueError(
@@ -718,6 +650,18 @@ def treinar_baseline(df_pre, equipment_id, model_type, preset, device,
     return treinar_era(fatia, steps, model_type, device, threshold_percentile, p.alarm_sigma,
                        spd, p.seed, p.model_kwargs, f"baseline_{model_type}_{preset}",
                        robusto=p.limiar_robusto, n_mad=p.limiar_mad)
+
+def lookback_minimo_horas(steps) -> float:
+    h = 0.0
+    for s in steps:
+        k = s["step"]
+        if k == "add_rolling_features":
+            h = max(h, float(max(s.get("windows") or [6, 24])))
+        elif k == "residualize":
+            h = max(h, float(max(s.get("windows_h") or [3])))
+        elif k == "moving_average":
+            h = max(h, float(s.get("window", 3)))
+    return h
 
 def auto_initial_train_days(
     df_pre: pd.DataFrame,
@@ -962,6 +906,12 @@ def drift_triggered_walkforward(
     preset: str = "baseline",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     steps = get_preprocessing_steps(equipment_id, preset=preset)
+    precisa_h = lookback_minimo_horas(steps)
+    if p.lookback_horas < precisa_h * 1.25:
+        novo_lb = precisa_h * 1.25
+        print(f"  [{detector_name}] [aviso] lookback {p.lookback_horas:g} h < o necessário "
+              f"para o preprocessing ({precisa_h:g} h); usando {novo_lb:g} h.")
+        p = replace(p, lookback_horas=novo_lb)
     inicio, fim = df_pre.index.min(), df_pre.index.max()
     spd = samples_per_day_de(df_pre)
     step_s = 86400.0 / spd
@@ -994,15 +944,15 @@ def drift_triggered_walkforward(
     parts: list[pd.DataFrame] = []
 
     cursor, era_start = corte_inicial, corte_inicial
-    suspeita: dict | None = None        
+    suspeita: dict | None = None
     persist_ctx = Persistencia(p.persist_contexto_n)
     mascara_op: pd.Series | None = None
     if df_pre.index.is_unique:
         mascara_op = pd.Series(df_pre.index < corte_inicial, index=df_pre.index)
     sem_dados_ini: pd.Timestamp | None = None
     sem_dados_n = 0
-    ultimo_adiamento = None               
-    pausa_ate: pd.Timestamp | None = None 
+    ultimo_adiamento = None
+    pausa_ate: pd.Timestamp | None = None
     pausa_motivo = ""
     bloqueio_inicio: pd.Timestamp | None = None
     bloqueio_ultimo: pd.Timestamp | None = None
@@ -1161,12 +1111,12 @@ def drift_triggered_walkforward(
             if av is None:
                 if diag_pendente:
                     motivo_bloq = ""
-                else: 
+                else:
                     motivo_bloq = "tendencia_30d" if diag["conclusao"] == "possivel_degradacao" else ""
             elif av["sensores_fora"]:
-                motivo_bloq = "sensor_fora_do_regime" 
+                motivo_bloq = "sensor_fora_do_regime"
             elif p.gate_anomalia and anomalia_ativa and not av["regime_mudou"]:
-                motivo_bloq = "anomalia_ativa_sem_regime" 
+                motivo_bloq = "anomalia_ativa_sem_regime"
             else:
                 motivo_bloq = ""
             bloquear = p.bloquear_degradacao and bool(motivo_bloq)
@@ -1193,7 +1143,7 @@ def drift_triggered_walkforward(
             if bloquear:
                 if bloqueio_ultimo is not None and \
                         (prox - bloqueio_ultimo).days > 2 * p.cooldown_bloqueio_dias:
-                    bloqueio_inicio = None 
+                    bloqueio_inicio = None
                 bloqueio_inicio = bloqueio_inicio or prox
                 bloqueio_ultimo = prox
                 evento["dias_em_bloqueio"] = (prox - bloqueio_inicio).days
@@ -1212,18 +1162,18 @@ def drift_triggered_walkforward(
                 bloqueio_inicio = None
                 if dias_regime_novo < p.min_dias_regime_novo or diag_pendente:
                     evento["decisao"] = decisao = "retreino_adiado_regime_curto"
-                    chave = suspeita["inicio"] 
+                    chave = suspeita["inicio"]
                     if ultimo_adiamento != chave or dias_regime_novo % 7 == 0:
                         print(f"  [{detector_name}] {prox.date()}: mudança em {t_mud.date()}, só "
                               f"{dias_regime_novo}d de regime novo (< {p.min_dias_regime_novo}"
                               f"{', diagnóstico pendente' if diag_pendente else ''}) → ADIADO.")
                     ultimo_adiamento = chave
-                    detector.rearm() 
+                    detector.rearm()
                     _mesclar_adiamento(drift_events)
                 else:
                     erros_brutos = erros_era[erros_era.index >= train_start]
                     erros_novos, frac_rem = erros_brutos, 0.0
-                    if p.gate_anomalia:   
+                    if p.gate_anomalia:
                         erros_novos, frac_rem = filtrar_anomalias_erros(
                             erros_brutos, hist, p.margem_anomalia_horas)
                     dec = decidir_recalibracao(erros_novos, era.ref_errors, p.alarm_sigma,
@@ -1269,7 +1219,7 @@ def drift_triggered_walkforward(
                                 fatia, steps, model_type, device, threshold_percentile,
                                 p.alarm_sigma, spd, p.seed + era_id + 1, p.model_kwargs,
                                 f"{detector_name}|retreino_em_{prox.date()}", excluir=excluir,
-                                robusto=p.limiar_robusto, n_mad=p.limiar_mad)
+                                robusto=p.limiar_robusto, n_mad=p.limiar_mad, residual_base=getattr(baseline.artifacts, "residual_model", None))
                         except ValueError as exc:
                             evento["decisao"] = decisao = "retreino_adiado_dados_insuficientes"
                             print(f"  [{detector_name}] {prox.date()}: retreino adiado ({exc})")
@@ -1291,7 +1241,7 @@ def drift_triggered_walkforward(
                                     df_pre, steps, era, nova, model_type, threshold_percentile,
                                     device, fim_treino, prox, p.lookback_horas, spd)
                                 fonte = "holdout_quarentena"
-                                if ganho != ganho: 
+                                if ganho != ganho:
                                     ganho = ganho_relativo(
                                         df_pre, steps, era, nova, model_type, threshold_percentile,
                                         device, nova.val_index.min(),
@@ -1496,7 +1446,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--equipment", required=True, choices=list(EQUIPMENT_CONFIGS.keys()))
     ap.add_argument("--local-data", action="store_true")
-    ap.add_argument("--models", nargs="+", default=None, choices=["dense", "lstm", "ocsvm", "iforest"],
+    ap.add_argument("--models", nargs="+", default=None, choices=["dense", "ocsvm", "iforest"],
                     help="Quais modelos testar (default: os 4)")
     ap.add_argument("--presets", nargs="+", default=None,
                     help="Presets de preprocessing (default: todos do equipamento)")
@@ -1527,7 +1477,10 @@ def main():
                    help="Sem novo disparo por tantos dias, a suspeita é descartada.")
 
     g = ap.add_argument_group("falha física × mudança de conceito")
-    g.add_argument("--deg-patterns", nargs="+", default=list(DEG_PADROES_DEFAULT))
+    g.add_argument("--deg-patterns", nargs="+", default=list(DEG_PADROES_DEFAULT),
+                   help="Trechos de nome que identificam sensores de desgaste (vibração, temperatura "
+                        "de mancal...). O gate avalia desvio nos DOIS sentidos (alta e queda). "
+                        "Nomes com espaço: use aspas, ex.: --deg-patterns Vib \"Temperatura Mancal\".")
     g.add_argument("--regime-cols", nargs="+", default=list(REGIME_COLS_DEFAULT),
                    help="Variáveis operacionais que definem o regime "
                         "(ex.: Corrente Vazao Temp_ambiente). Nunca são tratadas como sensor de desgaste. "
@@ -1555,9 +1508,11 @@ def main():
     g.add_argument("--regime-delta-min", type=float, default=1.0,
                    help="|Δ variável de regime| (desvios robustos da referência) que conta como mudança de regime.")
     g.add_argument("--resid-min", type=float, default=2.0,
-                   help="Resíduo do sensor (dado o regime), em desvios, que conta como sensor fora do previsto.")
+                   help="|Resíduo| do sensor (dado o regime), em desvios, que conta como sensor fora do previsto "
+                        "(alta ou queda).")
     g.add_argument("--tend-min", type=float, default=2.0,
-                   help="Subida do resíduo ao longo da janela, em desvios, que conta como rampa.")
+                   help="|Variação| do resíduo ao longo da janela, em desvios, que conta como rampa "
+                        "(para cima ou para baixo).")
     g.add_argument("--sem-gate-continuo", action="store_true",
                    help="Desliga a classificação contínua (regime_novo / falha_sensor) a cada chunk.")
     g.add_argument("--persist-contexto-n", type=int, default=2,
@@ -1627,7 +1582,7 @@ def main():
         Task.add_requirements("pyarrow")
         Task.add_requirements("torch", package_version="")
         task = Task.init(project_name=args.clearml_project,
-                         task_name=f"drift_retrain_{args.equipment}_grid",
+                         task_name=f"drift_retrain_{args.equipment}",
                          output_uri=True, reuse_last_task_id=False)
         task.connect(vars(args))
         task.set_base_docker("pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
@@ -1648,19 +1603,20 @@ def main():
     args.deg_patterns = reconstruir_nomes(args.deg_patterns, df_pre.columns, exato=False)
     print(f"  Variáveis de regime: {args.regime_cols}\n  Padrões de desgaste: {args.deg_patterns}")
 
-    deg_cols = sensores_degradacao(df_pre.columns, args.deg_patterns)
+    # sensores de desgaste nunca incluem as variáveis de regime
+    deg_cols = [c for c in sensores_degradacao(df_pre.columns, args.deg_patterns)
+                if c not in args.regime_cols]
     print(f"  Colunas tratadas como desgaste: {deg_cols}")
     n_temp = [c for c in deg_cols if "temperatura" in str(c).lower()]
-    if len(n_temp) != 1:
-        print(f"  [aviso] esperado 1 temperatura de degradação, casou {len(n_temp)}: {n_temp}")
-        
+    print(f"  Temperaturas no gate: {n_temp}")
+
     for c in args.regime_cols:
         if c not in df_pre.columns:
             sug = difflib.get_close_matches(c, [str(x) for x in df_pre.columns], n=3, cutoff=0.5)
             print(f"  [aviso] --regime-cols '{c}' não existe no dado. Parecidas: {sug or 'nenhuma'}. "
                   f"Use aspas por nome: --regime-cols \"nome 1\" \"nome 2\"")
 
-    model_names = args.models or ["dense", "lstm", "ocsvm", "iforest"]
+    model_names = args.models or ["dense", "ocsvm", "iforest"]
     available_presets = (list(config.preprocess_presets.keys())
                          if getattr(config, "preprocess_presets", None) else ["baseline"])
     preset_names = args.presets or available_presets
